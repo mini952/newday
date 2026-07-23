@@ -721,4 +721,13 @@ A feature release. Theme: sharper Task Database review filters and faster multi-
 
 ---
 
+### Repo & Deployment Setup — July 23, 2026
+
+Not a feature/bug version bump — the in-app version label stays **v1.8**. This records the move to a Git-backed, single-source-of-truth workflow and web deployment.
+
+- **GitHub repo as source of truth.** Project moved to `mini952/newday` (public, branch `main`). Files renamed to stable, version-free names (`app.jsx`, `index.html`, `testrig.html`, `PROJECT_PLAN.md`, `IMPLEMENTATION_PLAN.md`, `build.py`); the version now lives in content + git history, not filenames. See the Repo & Versioning Workflow section at the top of this doc.
+- **GitHub Pages deploy.** Live at `https://mini952.github.io/newday/`, always serving the latest `main`.
+- **PWA packaging.** Added `manifest.webmanifest` and gradient sunrise icons (`icon.png` / `icon-192.png` / `icon-512.png`); wired `manifest`, `apple-touch-icon`, and `theme-color` into the HTML head.
+- **Service worker (`sw.js`).** Added to satisfy Chrome's installability requirement (a fetch handler is required for the install path) so the app installs as a standalone dock app using the sunrise icon. Network-first strategy: always prefers the live deploy when online (no stale-cache trap), with the cached shell as an offline fallback. Cross-origin CDN libraries (React/Babel) are still fetched live, so a cold offline start needs a connection. Registration is guarded and silent-fail, so `file://` opens and the test rig are unaffected.
+
 *This document should be updated with each new version of NewDay Notebook.*

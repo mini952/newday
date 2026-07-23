@@ -26,6 +26,7 @@ testrig.html            A test-rig build (TEST_MODE on) with isolated storage; n
 app.jsx                 The single source of truth for the app. build.py produces both HTML files from this.
 build.py                Emits index.html + testrig.html from app.jsx (applies the Babel-standalone strip rules).
 manifest.webmanifest    PWA manifest — gives the installed dock app its icon, name, and standalone window.
+sw.js                   Service worker — makes the app installable (dock/standalone) and adds an offline shell fallback.
 icon.png / icon-192 / icon-512   App icons (gradient sunrise) referenced by the manifest.
 README.md               You are here.
 PROJECT_PLAN.md         The living source of truth: status, versioning workflow, features, and changelog.
