@@ -55,8 +55,8 @@ def main():
     # Test rig (flag on) + distinct title
     rig_body = body.replace("const TEST_MODE = false;", "const TEST_MODE = true;", 1)
     rig = assemble(rig_body).replace(
-        "<title>NewDay Notebook v1.8.2</title>",
-        "<title>NewDay Notebook v1.8.2 — TEST RIG</title>", 1)
+        "<title>NewDay Notebook v1.8.3</title>",
+        "<title>NewDay Notebook v1.8.3 — TEST RIG</title>", 1)
 
     for name, out in ((OUT_PROD, prod), (OUT_RIG, rig)):
         assert IMPORT_LINE.strip() not in out, f"{name}: react import leaked"
