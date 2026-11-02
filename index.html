@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NewDay Notebook v1.8</title>
+  <title>NewDay Notebook v1.8.2</title>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="NewDay Notebook">
@@ -35,7 +35,7 @@
     const { useState, useRef, useCallback, useEffect } = React;
 
 /**
- * NewDay Notebook v1.8
+ * NewDay Notebook v1.8.2
  * A daily task management app with Daily/Future Notebook workflow,
  * multi-tag system, task database, and tag manager.
  * Features: Ongoing tasks with sort (custom/priority/recent),
@@ -71,7 +71,15 @@
  * are drag-reorderable; "Add all (N)" commits the batch (listed order
  * preserved at the top of each destination) and closes. Staging state
  * survives tab switches but not reloads. No data model change.
- * Last updated: 2026-07-22
+ * v1.8 data v6 (sync Stage 1): every task and recurring template carries
+ * updatedAt (last change time) and reminders (list of ISO datetimes, no UI
+ * yet). Older saves and imports are backfilled on load.
+ * v1.8.2 (sync Stage 2): ⚙ Sync settings panel — GitHub owner / repo /
+ * file path and an access key, a Test connection button, and Forget key.
+ * The settings (including the key) live only in this device's localStorage
+ * under their own key, never in the notebook data or exports. Tasks are
+ * still loaded and saved only in localStorage; GitHub sync comes later.
+ * Last updated: 2026-11-01
  */
 
 
@@ -4469,6 +4477,171 @@ function RecurringTab({ recurringTemplates, setRecurringTemplates, categories, s
 }
 
 /* ═══════════════════════════════════════════
+   SYNC SETTINGS (v1.8.2, sync Stage 2)
+   ───────────────────────────────────────────
+   Where the shared notebook file lives on GitHub, plus this device's
+   access key. Stored ONLY in this browser's localStorage under its own
+   key — never inside the notebook data, never in Export, never in the
+   repo. Nothing here loads or saves tasks yet; that is a later stage.
+   ═══════════════════════════════════════════ */
+
+const SYNC_CONFIG_KEY = TEST_MODE ? "newday-sync-config-TEST" : "newday-sync-config";
+const SYNC_DEFAULTS = { owner: "mini952", repo: "newday-data", path: "notebook.json", token: "" };
+
+function loadSyncConfig() {
+  try {
+    const raw = localStorage.getItem(SYNC_CONFIG_KEY);
+    const data = raw ? JSON.parse(raw) : null;
+    return { ...SYNC_DEFAULTS, ...(data && typeof data === "object" ? data : {}) };
+  } catch (e) {
+    return { ...SYNC_DEFAULTS };
+  }
+}
+
+function saveSyncConfig(config) {
+  try {
+    localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
+    return true;
+  } catch (e) {
+    console.warn("Failed to save sync settings:", e);
+    return false;
+  }
+}
+
+// Check that the key can read owner/repo, then look for the file.
+// Returns { ok, message, detail? } in plain words for the panel.
+async function testSyncConnection({ owner, repo, path, token }) {
+  if (!token) return { ok: false, message: "Paste an access key first." };
+  if (!owner || !repo) return { ok: false, message: "Fill in the owner and repo." };
+  const headers = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+  const base = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  let res;
+  try {
+    res = await fetch(base, { headers, cache: "no-store" });
+  } catch (e) {
+    return { ok: false, message: "Couldn't reach GitHub. Check your internet connection and try again." };
+  }
+  if (res.status === 401) return { ok: false, message: "GitHub didn't accept this key. It may be mistyped, expired, or revoked. Paste it again or make a new one." };
+  if (res.status === 403) {
+    if (res.headers.get("x-ratelimit-remaining") === "0") return { ok: false, message: "GitHub is limiting requests right now. Wait a few minutes and try again." };
+    return { ok: false, message: "This key doesn't have access to that repo. Check that it includes " + repo + "." };
+  }
+  if (res.status === 404) return { ok: false, message: `Repo ${owner}/${repo} not found, or this key doesn't have access to it. Check the names, and that the key includes ${repo}.` };
+  if (!res.ok) return { ok: false, message: `GitHub returned an error (${res.status}). Try again in a minute.` };
+
+  // Repo reachable. Look for the file by listing its folder (cheap: no file
+  // content is downloaded).
+  const cleanPath = (path || "").replace(/^\/+|\/+$/g, "");
+  if (!cleanPath) return { ok: true, message: `✓ Connected to ${owner}/${repo}.`, detail: "Add a file path to check for the notebook file." };
+  const slash = cleanPath.lastIndexOf("/");
+  const dir = slash >= 0 ? cleanPath.slice(0, slash) : "";
+  const name = slash >= 0 ? cleanPath.slice(slash + 1) : cleanPath;
+  let detail = "";
+  try {
+    const dirRes = await fetch(`${base}/contents/${dir.split("/").map(encodeURIComponent).join("/")}`, { headers, cache: "no-store" });
+    if (dirRes.ok) {
+      const list = await dirRes.json();
+      const file = Array.isArray(list) ? list.find((f) => f.name === name && f.type === "file") : null;
+      detail = file
+        ? `Found ${cleanPath} (${file.size >= 1024 ? Math.round(file.size / 1024).toLocaleString() + " KB" : file.size + " bytes"}).`
+        : `${cleanPath} doesn't exist yet. That's expected until your tasks are uploaded.`;
+    } else if (dirRes.status === 404) {
+      detail = `${cleanPath} doesn't exist yet. That's expected until your tasks are uploaded.`;
+    } else {
+      detail = `Couldn't check for ${cleanPath} (GitHub error ${dirRes.status}).`;
+    }
+  } catch (e) {
+    detail = `Couldn't check for ${cleanPath}.`;
+  }
+  return { ok: true, message: `✓ Connected to ${owner}/${repo}.`, detail };
+}
+
+function SyncSettingsPanel({ onClose }) {
+  const [config, setConfig] = useState(loadSyncConfig);
+  const [savedToken, setSavedToken] = useState(() => loadSyncConfig().token);
+  const [status, setStatus] = useState(null); // { ok, message, detail? }
+  const [testing, setTesting] = useState(false);
+
+  const field = (k) => (e) => { setConfig((c) => ({ ...c, [k]: e.target.value })); setStatus(null); };
+  const cleaned = () => ({
+    owner: config.owner.trim(), repo: config.repo.trim(),
+    path: config.path.trim().replace(/^\/+/, ""), token: config.token.trim(),
+  });
+
+  const handleSave = () => {
+    const c = cleaned();
+    setConfig(c);
+    if (saveSyncConfig(c)) {
+      setSavedToken(c.token);
+      setStatus({ ok: true, message: "✓ Saved on this device." });
+    } else {
+      setStatus({ ok: false, message: "Couldn't save the settings in this browser." });
+    }
+  };
+
+  const handleTest = async () => {
+    setTesting(true);
+    setStatus({ ok: true, message: "Checking…" });
+    const result = await testSyncConnection(cleaned());
+    setTesting(false);
+    setStatus(result);
+  };
+
+  const handleForget = () => {
+    const c = { ...cleaned(), token: "" };
+    setConfig(c);
+    saveSyncConfig(c);
+    setSavedToken("");
+    setStatus({ ok: true, message: "Key removed from this device." });
+  };
+
+  const labelStyle = { fontSize: "12px", fontWeight: 600, color: "#6B6B67", marginBottom: "4px", display: "block" };
+  const inputStyle = { width: "100%", fontSize: "14px", padding: "8px 10px", borderRadius: "8px", border: "1px solid #EBEBEA", backgroundColor: "#FAFAF9", color: "#1A1A1A", fontFamily: "inherit", outline: "none" };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: "20px" }}>
+      <div data-testid="sync-panel" onClick={(e) => e.stopPropagation()} style={{ backgroundColor: "#FFFFFF", borderRadius: "16px", padding: "28px", maxWidth: "480px", width: "100%", maxHeight: "80vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.15)", fontFamily: "inherit" }}>
+        <h2 style={{ fontSize: "20px", fontWeight: 700, color: "#1A1A1A", margin: "0 0 4px 0" }}>⚙ Sync settings</h2>
+        <p style={{ fontSize: "13px", color: "#8A8A86", margin: "0 0 20px 0", lineHeight: 1.5 }}>
+          Where your shared notebook file lives on GitHub. Sync isn't switched on yet: your tasks are still saved only in this browser.
+          The key stays on this device and is never included in exports.
+        </p>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "12px" }}>
+          <label><span style={labelStyle}>Owner</span>
+            <input name="sync-owner" value={config.owner} onChange={field("owner")} style={inputStyle} autoComplete="off" spellCheck={false} />
+          </label>
+          <label><span style={labelStyle}>Repo</span>
+            <input name="sync-repo" value={config.repo} onChange={field("repo")} style={inputStyle} autoComplete="off" spellCheck={false} />
+          </label>
+        </div>
+        <label style={{ display: "block", marginBottom: "12px" }}><span style={labelStyle}>File path</span>
+          <input name="sync-path" value={config.path} onChange={field("path")} style={inputStyle} autoComplete="off" spellCheck={false} />
+        </label>
+        <label style={{ display: "block", marginBottom: "6px" }}><span style={labelStyle}>Access key</span>
+          <input name="sync-token" type="password" value={config.token} onChange={field("token")} placeholder="Paste this device's key" style={inputStyle} autoComplete="new-password" spellCheck={false} />
+        </label>
+        <p style={{ fontSize: "12px", color: savedToken ? "#059669" : "#AEAEA6", margin: "0 0 18px 0" }}>
+          {savedToken ? "A key is saved on this device." : "No key saved on this device."}
+        </p>
+        {status && (
+          <div data-testid="sync-status" style={{ fontSize: "13px", lineHeight: 1.5, padding: "10px 12px", borderRadius: "8px", marginBottom: "16px", backgroundColor: status.ok ? "#ECFDF5" : "#FEF2F2", color: status.ok ? "#047857" : "#B91C1C" }}>
+            {status.message}
+            {status.detail && <div style={{ color: "#6B6B67", marginTop: "2px" }}>{status.detail}</div>}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+          <button onClick={handleSave} style={{ ...pillBtnStyle, backgroundColor: "#1A1A1A", color: "#FFF" }}>Save</button>
+          <button onClick={handleTest} disabled={testing} style={{ ...bulkBtnStyle, opacity: testing ? 0.6 : 1 }}>{testing ? "Testing…" : "Test connection"}</button>
+          <button onClick={handleForget} disabled={!savedToken && !config.token} style={{ ...bulkBtnStyle, color: "#B91C1C", opacity: !savedToken && !config.token ? 0.5 : 1 }}>Forget key</button>
+          <div style={{ flex: 1 }} />
+          <button onClick={onClose} style={bulkBtnStyle}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════
    MAIN APP
    ═══════════════════════════════════════════ */
 
@@ -4576,6 +4749,7 @@ function TodoApp() {
   // Import data from JSON file
   const fileInputRef = useRef(null);
   const [importStatus, setImportStatus] = useState(null);
+  const [syncOpen, setSyncOpen] = useState(false);
 
   const handleImport = (e) => {
     const file = e.target.files?.[0];
@@ -4865,7 +5039,19 @@ function TodoApp() {
               ↑ Import
             </button>
             <input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} style={{ display: "none" }} />
-            <span style={{ fontSize: "10px", fontWeight: 600, color: "#C4C4C0", letterSpacing: "0.04em", marginLeft: "4px", userSelect: "none" }}>v1.8</span>
+            <button onClick={() => setSyncOpen(true)} title="Sync settings"
+              style={{
+                fontSize: "11px", fontWeight: 600, padding: "4px 10px", borderRadius: "6px",
+                border: "1px solid #EBEBEA", backgroundColor: "#FFFFFF", color: "#8A8A86",
+                cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: "4px",
+                transition: "background-color 0.1s, color 0.1s",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#F0F0EC"; e.currentTarget.style.color = "#5A5A56"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#FFFFFF"; e.currentTarget.style.color = "#8A8A86"; }}
+            >
+              ⚙ Sync
+            </button>
+            <span style={{ fontSize: "10px", fontWeight: 600, color: "#C4C4C0", letterSpacing: "0.04em", marginLeft: "4px", userSelect: "none" }}>v1.8.2</span>
           </div>
         </div>
       </div>
@@ -4898,6 +5084,7 @@ function TodoApp() {
         {activeTab === "database" && <DatabaseTab allTasks={allTasks} categories={categories} />}
         {activeTab === "tags" && <TagsTab categories={categories} setCategories={setCategories} />}
       </div>
+      {syncOpen && <SyncSettingsPanel onClose={() => setSyncOpen(false)} />}
     </div>
   );
 }
