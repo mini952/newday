@@ -212,7 +212,78 @@ function randomTagColors() {
 
 /* ─── localStorage persistence ─── */
 const STORAGE_KEY = TEST_MODE ? "newday-notebook-TEST" : "newday-notebook";
-const DATA_VERSION = 5;
+const DATA_VERSION = 6;
+
+/* ─── v6: per-item sync fields ───
+   Every task and recurring template carries:
+     updatedAt  ISO time of the item's last change (create, edit, complete,
+                delete, or move between sections). Later sync stages compare
+                it to spot the same item edited in two places.
+     reminders  list of ISO datetimes (optional "remind me at" times). No UI
+                yet; Task Tracker reads them from the shared file.
+   The order fields are recomputed from list position on every save, so they
+   are ignored when deciding whether an item changed. */
+const ITEM_ARRAY_KEYS = ["todayTasks", "futureTasks", "backlogTasks", "somedayTasks", "ongoingTasks", "recurringTemplates"];
+const NON_CONTENT_FIELDS = ["updatedAt", "dayOrder", "backlogOrder", "somedayOrder", "ongoingOrder"];
+
+function itemContentKey(item) {
+  const rest = { ...item };
+  NON_CONTENT_FIELDS.forEach((k) => { delete rest[k]; });
+  return JSON.stringify(rest);
+}
+
+// Best guess at when a pre-v6 item last changed: the newest timestamp it
+// already records. Null when it has none.
+function latestKnownTimestamp(item) {
+  const candidates = [item.createdDate, item.completedDate, item.deletedDate, item.ongoingCompletedDate];
+  (Array.isArray(item.dueDateHistory) ? item.dueDateHistory : []).forEach((h) => candidates.push(h?.changedAt));
+  (Array.isArray(item.ongoingCompletions) ? item.ongoingCompletions : []).forEach((c) => candidates.push(c?.completedAt));
+  (Array.isArray(item.completions) ? item.completions : []).forEach((c) => candidates.push(c?.timestamp));
+  let best = null;
+  candidates.forEach((c) => {
+    if (typeof c !== "string" || !c) return;
+    const ms = Date.parse(c);
+    if (!Number.isNaN(ms) && (best === null || ms > best)) best = ms;
+  });
+  return best === null ? null : new Date(best).toISOString();
+}
+
+// Fill missing updatedAt / reminders; leaves every other field untouched.
+function backfillSyncFields(item, fallbackTs) {
+  if (!item || typeof item !== "object") return item;
+  const hasUpdatedAt = typeof item.updatedAt === "string" && item.updatedAt !== "";
+  const hasReminders = Array.isArray(item.reminders);
+  if (hasUpdatedAt && hasReminders) return item;
+  return {
+    ...item,
+    ...(hasUpdatedAt ? {} : { updatedAt: latestKnownTimestamp(item) || fallbackTs }),
+    ...(hasReminders ? {} : { reminders: [] }),
+  };
+}
+
+function backfillSyncFieldsAll(arr, fallbackTs) {
+  return Array.isArray(arr) ? arr.map((t) => backfillSyncFields(t, fallbackTs)) : arr;
+}
+
+// Used by every list setter: items that are new to this list or whose content
+// changed get updatedAt = now; unchanged items keep their old updatedAt.
+function stampChangedItems(prev, next) {
+  if (!Array.isArray(next)) return next;
+  const prevById = new Map();
+  if (Array.isArray(prev)) prev.forEach((p) => { if (p && p.id != null) prevById.set(p.id, p); });
+  let now = null;
+  return next.map((item) => {
+    if (!item || typeof item !== "object") return item;
+    const before = prevById.get(item.id);
+    if (before === item) return item;
+    const normalized = Array.isArray(item.reminders) ? item : { ...item, reminders: [] };
+    if (before && itemContentKey(before) === itemContentKey(normalized)) {
+      return normalized.updatedAt === before.updatedAt ? normalized : { ...normalized, updatedAt: before.updatedAt };
+    }
+    if (!now) now = nowTimestamp();
+    return { ...normalized, updatedAt: now };
+  });
+}
 
 function saveToStorage(data) {
   try {
@@ -240,43 +311,55 @@ function loadFromStorage() {
     //   Recurring task instances get originalDueDate (default = dueDate). This anchors
     //   roll-forward drift display: when a non-daily instance is carried into a new day,
     //   dueDate updates but originalDueDate stays put, and the gap is shown to the user.
-    // Accept v1, v2, v3, and v4 saves — new fields are backfilled automatically.
-    if (data.version === DATA_VERSION || data.version === 4 || data.version === 3 || data.version === 2 || data.version === 1) {
-      // v4→v5 backfill: ensure weekly templates have schedule.interval = 1
-      if (Array.isArray(data.recurringTemplates)) {
-        data.recurringTemplates = data.recurringTemplates.map((t) => {
-          if (t?.recurrenceRule?.frequency === "weekly") {
-            const sched = t.recurrenceRule.schedule || {};
-            if (sched.interval === undefined || sched.interval === null) {
-              return { ...t, recurrenceRule: { ...t.recurrenceRule, schedule: { ...sched, interval: 1 } } };
-            }
-          }
-          return t;
-        });
-      }
-      // v4→v5 backfill: ensure recurring instances have originalDueDate.
-      // Without this, drift after a v1.7 roll-forward would compare against undefined.
-      const backfillRecurringOriginal = (arr) => Array.isArray(arr)
-        ? arr.map((t) => (t?.recurringParentId && !t.originalDueDate && t.dueDate)
-            ? { ...t, originalDueDate: t.dueDate }
-            : t)
-        : arr;
-      data.todayTasks = backfillRecurringOriginal(data.todayTasks);
-      data.futureTasks = backfillRecurringOriginal(data.futureTasks);
-      data.backlogTasks = backfillRecurringOriginal(data.backlogTasks);
-      // Note: v1.7.1 added a one-time cleanup here that filtered orphan
-      // skipped/missed recurring instances out of backlogTasks. That was
-      // rolled back in v1.7.2 — those rows are needed by the Task Database
-      // (Recurring filter shows them as history) and by getMaxSequence
-      // (next instance sequence calculation). The Backlog UI now filters
-      // them out at the display layer instead — see activeBacklogTasks.
-      return data;
+    // v5→v6: updatedAt (ISO) and reminders ([]) on every task and template.
+    //   updatedAt is backfilled from the newest timestamp the item already
+    //   records, else the load time. Nothing else changes.
+    // Accept v1–v5 saves — new fields are backfilled automatically.
+    if (data.version === DATA_VERSION || data.version === 5 || data.version === 4 || data.version === 3 || data.version === 2 || data.version === 1) {
+      return migrateData(data);
     }
     return null;
   } catch (e) {
     console.warn("Failed to load from localStorage:", e);
     return null;
   }
+}
+
+// Backfills shared by load and Import. Idempotent: running it on data that is
+// already current changes nothing.
+function migrateData(data) {
+  // v4→v5 backfill: ensure weekly templates have schedule.interval = 1
+  if (Array.isArray(data.recurringTemplates)) {
+    data.recurringTemplates = data.recurringTemplates.map((t) => {
+      if (t?.recurrenceRule?.frequency === "weekly") {
+        const sched = t.recurrenceRule.schedule || {};
+        if (sched.interval === undefined || sched.interval === null) {
+          return { ...t, recurrenceRule: { ...t.recurrenceRule, schedule: { ...sched, interval: 1 } } };
+        }
+      }
+      return t;
+    });
+  }
+  // v4→v5 backfill: ensure recurring instances have originalDueDate.
+  // Without this, drift after a v1.7 roll-forward would compare against undefined.
+  const backfillRecurringOriginal = (arr) => Array.isArray(arr)
+    ? arr.map((t) => (t?.recurringParentId && !t.originalDueDate && t.dueDate)
+        ? { ...t, originalDueDate: t.dueDate }
+        : t)
+    : arr;
+  data.todayTasks = backfillRecurringOriginal(data.todayTasks);
+  data.futureTasks = backfillRecurringOriginal(data.futureTasks);
+  data.backlogTasks = backfillRecurringOriginal(data.backlogTasks);
+  // Note: v1.7.1 added a one-time cleanup here that filtered orphan
+  // skipped/missed recurring instances out of backlogTasks. That was
+  // rolled back in v1.7.2 — those rows are needed by the Task Database
+  // (Recurring filter shows them as history) and by getMaxSequence
+  // (next instance sequence calculation). The Backlog UI now filters
+  // them out at the display layer instead — see activeBacklogTasks.
+  // v5→v6 backfill: updatedAt + reminders on every item.
+  const loadTs = nowTimestamp();
+  ITEM_ARRAY_KEYS.forEach((k) => { data[k] = backfillSyncFieldsAll(data[k], loadTs); });
+  return data;
 }
 
 function groupByCreatedDate(tasks) {
@@ -4397,40 +4480,47 @@ export default function TodoApp() {
   ];
 
   // Load saved data or fall back to defaults
-  const saved = loadFromStorage();
+  // Read once on mount (it was re-read and re-parsed on every render).
+  const [saved] = useState(loadFromStorage);
 
   const [categories, setCategories] = useState(saved?.categories || defaultTagCategories);
   const [currentDay, setCurrentDay] = useState(saved?.currentDay || getTodayStr());
-  const [todayTasks, setTodayTasksRaw] = useState(saved?.todayTasks ? assignDayOrder(saved.todayTasks) : defaultToday);
+  const [todayTasks, setTodayTasksRaw] = useState(saved?.todayTasks ? assignDayOrder(saved.todayTasks) : backfillSyncFieldsAll(defaultToday, ts));
   const setTodayTasks = useCallback((updater) => {
     setTodayTasksRaw((prev) => {
       const next = typeof updater === "function" ? updater(prev) : updater;
-      return assignDayOrder(next);
+      return assignDayOrder(stampChangedItems(prev, next));
     });
   }, []);
-  const [backlogTasks, setBacklogTasksRaw] = useState(saved?.backlogTasks ? assignBacklogOrder(saved.backlogTasks) : assignBacklogOrder(defaultBacklog));
+  const [backlogTasks, setBacklogTasksRaw] = useState(saved?.backlogTasks ? assignBacklogOrder(saved.backlogTasks) : assignBacklogOrder(backfillSyncFieldsAll(defaultBacklog, ts)));
   const setBacklogTasks = useCallback((updater) => {
     setBacklogTasksRaw((prev) => {
       const next = typeof updater === "function" ? updater(prev) : updater;
-      return assignBacklogOrder(next);
+      return assignBacklogOrder(stampChangedItems(prev, next));
     });
   }, []);
-  const [somedayTasks, setSomedayTasksRaw] = useState(saved?.somedayTasks ? assignSomedayOrder(saved.somedayTasks) : assignSomedayOrder(defaultSomeday));
+  const [somedayTasks, setSomedayTasksRaw] = useState(saved?.somedayTasks ? assignSomedayOrder(saved.somedayTasks) : assignSomedayOrder(backfillSyncFieldsAll(defaultSomeday, ts)));
   const setSomedayTasks = useCallback((updater) => {
     setSomedayTasksRaw((prev) => {
       const next = typeof updater === "function" ? updater(prev) : updater;
-      return assignSomedayOrder(next);
+      return assignSomedayOrder(stampChangedItems(prev, next));
     });
   }, []);
-  const [futureTasks, setFutureTasks] = useState(saved?.futureTasks || []);
+  const [futureTasks, setFutureTasksRaw] = useState(saved?.futureTasks || []);
+  const setFutureTasks = useCallback((updater) => {
+    setFutureTasksRaw((prev) => stampChangedItems(prev, typeof updater === "function" ? updater(prev) : updater));
+  }, []);
   const [ongoingTasks, setOngoingTasksRaw] = useState(saved?.ongoingTasks ? assignOngoingOrder(saved.ongoingTasks) : []);
   const setOngoingTasks = useCallback((updater) => {
     setOngoingTasksRaw((prev) => {
       const next = typeof updater === "function" ? updater(prev) : updater;
-      return assignOngoingOrder(next);
+      return assignOngoingOrder(stampChangedItems(prev, next));
     });
   }, []);
-  const [recurringTemplates, setRecurringTemplates] = useState(saved?.recurringTemplates || []);
+  const [recurringTemplates, setRecurringTemplatesRaw] = useState(saved?.recurringTemplates || []);
+  const setRecurringTemplates = useCallback((updater) => {
+    setRecurringTemplatesRaw((prev) => stampChangedItems(prev, typeof updater === "function" ? updater(prev) : updater));
+  }, []);
 
   // Auto-save to localStorage whenever data changes
   useEffect(() => {
@@ -4465,12 +4555,15 @@ export default function TodoApp() {
           setTimeout(() => setImportStatus(null), 3000);
           return;
         }
-        setTodayTasks(data.todayTasks);
-        setBacklogTasks(data.backlogTasks);
-        setSomedayTasks(data.somedayTasks);
-        setFutureTasks(data.futureTasks || []);
-        setOngoingTasks(data.ongoingTasks || []);
-        setRecurringTemplates(data.recurringTemplates || []);
+        // Run the same backfills as a load, then set the lists directly so the
+        // file's own updatedAt values are kept rather than re-stamped as new.
+        migrateData(data);
+        setTodayTasksRaw(assignDayOrder(data.todayTasks));
+        setBacklogTasksRaw(assignBacklogOrder(data.backlogTasks));
+        setSomedayTasksRaw(assignSomedayOrder(data.somedayTasks));
+        setFutureTasksRaw(data.futureTasks || []);
+        setOngoingTasksRaw(assignOngoingOrder(data.ongoingTasks || []));
+        setRecurringTemplatesRaw(data.recurringTemplates || []);
         setCategories(data.categories);
         if (data.currentDay) setCurrentDay(data.currentDay);
         setImportStatus("success");
