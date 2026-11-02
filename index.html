@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NewDay Notebook v1.8.4</title>
+  <title>NewDay Notebook v1.8.5</title>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="NewDay Notebook">
@@ -35,7 +35,7 @@
     const { useState, useRef, useCallback, useEffect } = React;
 
 /**
- * NewDay Notebook v1.8.4
+ * NewDay Notebook v1.8.5
  * A daily task management app with Daily/Future Notebook workflow,
  * multi-tag system, task database, and tag manager.
  * Features: Ongoing tasks with sort (custom/priority/recent),
@@ -94,6 +94,15 @@
  * New Day on both sides asks which day to keep. Nothing is written until
  * Save, which re-checks GitHub first. A never-synced device can switch to
  * GitHub's copy (after an automatic backup download) or merge.
+ * v1.8.5 (sync Stage 5): offline — clear Offline badge, edits marked unsaved
+ * and kept locally (also across reloads; the service worker now caches the
+ * React/Babel/font files so the app opens offline), sync resumes on the
+ * online event, focus, or Refresh. Key problems — 401 prompt with a button
+ * to Sync settings, separate no-access and rate-limit messages, and a key
+ * expiry reminder from 14 days before (GitHub's expiry header when
+ * readable, or the date in Sync settings), dismissible per day. Reminder
+ * times: add/edit/remove several Eastern date-times per task in the add and
+ * edit forms (stored in `reminders`); a 🔔 count shows on the task.
  * Last updated: 2026-11-01
  */
 
@@ -111,7 +120,7 @@
 const TEST_MODE = false;
 
 // Shown in the header and compared against the deployed page to offer a reload.
-const APP_VERSION = "1.8.4";
+const APP_VERSION = "1.8.5";
 
 /* ═══════════════════════════════════════════
    DATA MODEL & HELPERS
@@ -218,6 +227,50 @@ function formatDate(dateStr) {
   if (!dateStr) return "—";
   const d = new Date(dateStr.includes("T") ? dateStr : dateStr + "T12:00:00");
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+/* ─── Reminder times (v1.8.5) ───
+   Stored per item in `reminders` as ISO datetimes with the US Eastern
+   offset, e.g. "2026-11-03T09:00:00-05:00". The app only stores and shows
+   them; Task Tracker sends the pings. The form works in Eastern time. */
+const REMINDER_TZ = "America/New_York";
+
+function easternWallClock(date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: REMINDER_TZ, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(date);
+  const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+}
+
+// ISO reminder -> "YYYY-MM-DDTHH:MM" (Eastern) for a datetime-local input.
+function reminderToInput(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : easternWallClock(d);
+}
+
+// "YYYY-MM-DDTHH:MM" (Eastern) -> ISO with the right -05:00 / -04:00 offset.
+function inputToReminder(local) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(local || "");
+  if (!m) return null;
+  const wall = m[0];
+  const asUtc = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+  for (const hours of [5, 4]) {
+    if (easternWallClock(new Date(asUtc + hours * 3600000)) === wall) return `${wall}:00-0${hours}:00`;
+  }
+  return `${wall}:00-04:00`; // inside the spring-forward gap: treat as daylight time
+}
+
+function remindersFromInputs(values) {
+  const out = values.map(inputToReminder).filter(Boolean);
+  return [...new Set(out)].sort((a, b) => new Date(a) - new Date(b));
+}
+
+function formatReminder(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("en-US", { timeZone: REMINDER_TZ, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function formatDateShort(dateStr) {
@@ -816,6 +869,8 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
   const [editOngoing, setEditOngoing] = useState(!!task.ongoing);
   const [editStatus, setEditStatus] = useState(task.status || "");
   const [editStatusNote, setEditStatusNote] = useState(task.statusNote || "");
+  const initialReminderInputs = () => (Array.isArray(task.reminders) ? task.reminders.map(reminderToInput) : []);
+  const [editReminders, setEditReminders] = useState(initialReminderInputs);
   const taskRef = useRef(null);
   const editTitleRef = useRef(editTitle);
   const editDescRef = useRef(editDesc);
@@ -824,6 +879,11 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
   const editOngoingRef = useRef(editOngoing);
   const editStatusRef = useRef(editStatus);
   const editStatusNoteRef = useRef(editStatusNote);
+  const editRemindersRef = useRef(editReminders);
+  editRemindersRef.current = editReminders;
+  // Only write reminders when they were actually changed in the editor, so
+  // reminder times set elsewhere (e.g. by Task Tracker) keep their exact text.
+  const reminderUpdates = (inputs) => (JSON.stringify(inputs) === JSON.stringify(initialReminderInputs()) ? {} : { reminders: remindersFromInputs(inputs) });
   editTitleRef.current = editTitle;
   editDescRef.current = editDesc;
   editDueDateRef.current = editDueDate;
@@ -854,6 +914,7 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
               ongoing: isOngoing,
               status: editStatusRef.current || null,
               statusNote: editStatusRef.current === "waiting" ? editStatusNoteRef.current.trim() : "",
+              ...reminderUpdates(editRemindersRef.current),
             };
             // Only track due date changes for non-ongoing tasks
             if (!isOngoing && newDueDate !== task.dueDate) {
@@ -883,6 +944,7 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
     setEditOngoing(!!task.ongoing);
     setEditStatus(task.status || "");
     setEditStatusNote(task.statusNote || "");
+    setEditReminders(initialReminderInputs());
   };
 
   const buildSaveUpdates = () => {
@@ -897,6 +959,7 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
       ongoing: isOngoing,
       status: editStatus || null,
       statusNote: editStatus === "waiting" ? editStatusNote.trim() : "",
+      ...reminderUpdates(editReminders),
     };
     // Track due date changes (only for non-ongoing)
     if (!isOngoing && editDueDate !== task.dueDate) {
@@ -927,6 +990,7 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
     setEditOngoing(!!task.ongoing);
     setEditStatus(task.status || "");
     setEditStatusNote(task.statusNote || "");
+    setEditReminders(initialReminderInputs());
     setEditing(false);
   };
   const handleKeyDown = (e) => {
@@ -1012,6 +1076,10 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
             <>
               <div style={{ fontSize: "15px", fontWeight: 500, color: "#1A1A1A", textDecoration: task.completed ? "line-through" : "none", lineHeight: 1.4, display: "flex", alignItems: "center", gap: "8px" }}>
                 <span>{task.title}</span>
+                {Array.isArray(task.reminders) && task.reminders.length > 0 && (
+                  <span data-testid="reminder-bell" title={"Reminders:\n" + task.reminders.map(formatReminder).join("\n")}
+                    style={{ fontSize: "11px", fontWeight: 600, color: "#8A8A86", whiteSpace: "nowrap", flexShrink: 0 }}>🔔 {task.reminders.length}</span>
+                )}
                 {isDragging && bulkDragCount > 1 && (
                   <span style={{ fontSize: "10px", fontWeight: 700, padding: "2px 7px", borderRadius: "10px", backgroundColor: "#4F46E5", color: "#FFFFFF", display: "inline-block" }}>
                     +{bulkDragCount - 1} more
@@ -1184,6 +1252,7 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
               />
             )}
           </div>
+          <ReminderEditor values={editReminders} onChange={setEditReminders} defaultDate={editDueDate} />
           <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
             {task.createdDate && <span style={{ fontSize: "11px", color: "#C4C4C0" }}>Created {formatDate(task.createdDate)}</span>}
             {task.dayOrder != null && <span style={{ fontSize: "11px", color: "#C4C4C0" }}>· Priority #{task.dayOrder}</span>}
@@ -1256,6 +1325,29 @@ const editFieldStyle = {
   fontFamily: "inherit", cursor: "pointer", outline: "none",
 };
 
+// Reminder times editor (v1.8.5): any number of Eastern date-times.
+// `values` are datetime-local strings ("YYYY-MM-DDTHH:MM").
+function ReminderEditor({ values, onChange, defaultDate }) {
+  const today = easternWallClock(new Date()).slice(0, 10);
+  return (
+    <div data-testid="reminder-editor" style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
+      <span style={{ fontSize: "11px", color: "#AEAEA6" }}>🔔 Reminders</span>
+      {values.map((v, i) => (
+        <span key={i} style={{ ...editFieldStyle, display: "flex", alignItems: "center", gap: "2px", padding: "0 6px", cursor: "default" }}>
+          <input type="datetime-local" data-testid="reminder-input" value={v}
+            onChange={(e) => onChange(values.map((x, j) => (j === i ? e.target.value : x)))}
+            style={{ fontSize: "12px", border: "none", outline: "none", backgroundColor: "transparent", fontFamily: "inherit", color: "#6B6B67", padding: "4px 0" }} />
+          <button data-testid="reminder-remove" onClick={() => onChange(values.filter((_, j) => j !== i))} title="Remove reminder"
+            style={{ fontSize: "10px", border: "none", backgroundColor: "transparent", color: "#AEAEA6", cursor: "pointer", fontFamily: "inherit", padding: "0 2px" }}>✕</button>
+        </span>
+      ))}
+      <button data-testid="reminder-add" onClick={() => onChange([...values, `${defaultDate || today}T09:00`])}
+        style={{ ...editFieldStyle, color: "#8A8A86" }}>+ Add time</button>
+      {values.length > 0 && <span style={{ fontSize: "10px", color: "#C4C4C0" }}>Eastern time · Task Tracker sends the ping</span>}
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════
    SECTION HEADER
    ═══════════════════════════════════════════ */
@@ -1283,6 +1375,7 @@ function NewTaskForm({ categories, setCategories, onAdd, defaultDueDate, submitL
   const [tags, setTags] = useState({});
   const [dueDate, setDueDate] = useState(initialDueDate);
   const [ongoing, setOngoing] = useState(false);
+  const [reminders, setReminders] = useState([]);
   const [showDetails, setShowDetails] = useState(!!alwaysExpanded);
   const [addingProject, setAddingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
@@ -1299,8 +1392,8 @@ function NewTaskForm({ categories, setCategories, onAdd, defaultDueDate, submitL
 
   const handleAdd = () => {
     if (!title.trim()) return;
-    onAdd({ id: generateId(), title: title.trim(), description: description.trim(), tags: { ...tags }, dueDate: ongoing ? "" : dueDate, originalDueDate: ongoing ? "" : dueDate, dueDateHistory: [], createdDate: nowTimestamp(), completedDate: null, completed: false, ongoing, ongoingCompletions: [], ongoingCompleted: false, ongoingCompletedDate: null, ongoingOrder: 0 });
-    setTitle(""); setDescription(""); setTags({}); setDueDate(initialDueDate); setOngoing(false);
+    onAdd({ id: generateId(), title: title.trim(), description: description.trim(), tags: { ...tags }, dueDate: ongoing ? "" : dueDate, originalDueDate: ongoing ? "" : dueDate, dueDateHistory: [], createdDate: nowTimestamp(), completedDate: null, completed: false, ongoing, ongoingCompletions: [], ongoingCompleted: false, ongoingCompletedDate: null, ongoingOrder: 0, reminders: remindersFromInputs(reminders) });
+    setTitle(""); setDescription(""); setTags({}); setDueDate(initialDueDate); setOngoing(false); setReminders([]);
     if (alwaysExpanded) { setTimeout(() => titleRef.current?.focus(), 0); }
     else setShowDetails(false);
   };
@@ -1309,7 +1402,7 @@ function NewTaskForm({ categories, setCategories, onAdd, defaultDueDate, submitL
     if (alwaysExpanded) return;
     setTimeout(() => {
       if (formRef.current && !formRef.current.contains(document.activeElement)) {
-        if (!title.trim() && !description.trim() && Object.keys(tags).length === 0) setShowDetails(false);
+        if (!title.trim() && !description.trim() && Object.keys(tags).length === 0 && reminders.length === 0) setShowDetails(false);
       }
     }, 0);
   };
@@ -1398,10 +1491,13 @@ function NewTaskForm({ categories, setCategories, onAdd, defaultDueDate, submitL
               Ongoing
             </label>
             <div style={{ flex: 1 }} />
-            <button onClick={() => { if (!alwaysExpanded) setShowDetails(false); setTitle(""); setDescription(""); setTags({}); setDueDate(initialDueDate); }}
+            <button onClick={() => { if (!alwaysExpanded) setShowDetails(false); setTitle(""); setDescription(""); setTags({}); setDueDate(initialDueDate); setReminders([]); }}
               style={{ ...pillBtnStyle, backgroundColor: "transparent", color: "#AEAEA6", border: "none" }}>{alwaysExpanded ? "Clear" : "Cancel"}</button>
             <button onClick={handleAdd}
               style={{ ...pillBtnStyle, backgroundColor: title.trim() ? "#1A1A1A" : "#D4D4D0", color: "#FFF", cursor: title.trim() ? "pointer" : "not-allowed" }}>{submitLabel}</button>
+          </div>
+          <div style={{ marginTop: "10px" }}>
+            <ReminderEditor values={reminders} onChange={setReminders} defaultDate={ongoing ? "" : dueDate} />
           </div>
         </>
       )}
@@ -4504,7 +4600,7 @@ function RecurringTab({ recurringTemplates, setRecurringTemplates, categories, s
    ═══════════════════════════════════════════ */
 
 const SYNC_CONFIG_KEY = TEST_MODE ? "newday-sync-config-TEST" : "newday-sync-config";
-const SYNC_DEFAULTS = { owner: "mini952", repo: "newday-data", path: "notebook.json", token: "" };
+const SYNC_DEFAULTS = { owner: "mini952", repo: "newday-data", path: "notebook.json", token: "", tokenExpires: "" };
 
 function loadSyncConfig() {
   try {
@@ -4546,11 +4642,12 @@ async function testSyncConnection({ owner, repo, path, token }) {
   }
   if (res.status === 404) return { ok: false, message: `Repo ${owner}/${repo} not found, or this key doesn't have access to it. Check the names, and that the key includes ${repo}.` };
   if (!res.ok) return { ok: false, message: `GitHub returned an error (${res.status}). Try again in a minute.` };
+  const tokenExpires = readTokenExpiry(res);
 
   // Repo reachable. Look for the file by listing its folder (cheap: no file
   // content is downloaded).
   const cleanPath = (path || "").replace(/^\/+|\/+$/g, "");
-  if (!cleanPath) return { ok: true, message: `✓ Connected to ${owner}/${repo}.`, detail: "Add a file path to check for the notebook file." };
+  if (!cleanPath) return { ok: true, tokenExpires, message: `✓ Connected to ${owner}/${repo}.`, detail: "Add a file path to check for the notebook file." };
   const slash = cleanPath.lastIndexOf("/");
   const dir = slash >= 0 ? cleanPath.slice(0, slash) : "";
   const name = slash >= 0 ? cleanPath.slice(slash + 1) : cleanPath;
@@ -4571,7 +4668,7 @@ async function testSyncConnection({ owner, repo, path, token }) {
   } catch (e) {
     detail = `Couldn't check for ${cleanPath}.`;
   }
-  return { ok: true, message: `✓ Connected to ${owner}/${repo}.`, detail };
+  return { ok: true, tokenExpires, message: `✓ Connected to ${owner}/${repo}.`, detail };
 }
 
 function SyncSettingsPanel({ onClose }) {
@@ -4584,6 +4681,7 @@ function SyncSettingsPanel({ onClose }) {
   const cleaned = () => ({
     owner: config.owner.trim(), repo: config.repo.trim(),
     path: config.path.trim().replace(/^\/+/, ""), token: config.token.trim(),
+    tokenExpires: config.tokenExpires || "",
   });
 
   const handleSave = () => {
@@ -4601,12 +4699,13 @@ function SyncSettingsPanel({ onClose }) {
     setTesting(true);
     setStatus({ ok: true, message: "Checking…" });
     const result = await testSyncConnection(cleaned());
+    if (result.tokenExpires) setConfig((c) => ({ ...c, tokenExpires: result.tokenExpires }));
     setTesting(false);
     setStatus(result);
   };
 
   const handleForget = () => {
-    const c = { ...cleaned(), token: "" };
+    const c = { ...cleaned(), token: "", tokenExpires: "" };
     setConfig(c);
     saveSyncConfig(c);
     setSavedToken("");
@@ -4621,7 +4720,7 @@ function SyncSettingsPanel({ onClose }) {
       <div data-testid="sync-panel" onClick={(e) => e.stopPropagation()} style={{ backgroundColor: "#FFFFFF", borderRadius: "16px", padding: "28px", maxWidth: "480px", width: "100%", maxHeight: "80vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.15)", fontFamily: "inherit" }}>
         <h2 style={{ fontSize: "20px", fontWeight: 700, color: "#1A1A1A", margin: "0 0 4px 0" }}>⚙ Sync settings</h2>
         <p style={{ fontSize: "13px", color: "#8A8A86", margin: "0 0 20px 0", lineHeight: 1.5 }}>
-          Where your shared notebook file lives on GitHub. Sync isn't switched on yet: your tasks are still saved only in this browser.
+          Where your shared notebook file lives on GitHub. Your tasks are always kept in this browser too, so you can keep working offline or if the key stops working.
           The key stays on this device and is never included in exports.
         </p>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "12px" }}>
@@ -4637,6 +4736,9 @@ function SyncSettingsPanel({ onClose }) {
         </label>
         <label style={{ display: "block", marginBottom: "6px" }}><span style={labelStyle}>Access key</span>
           <input name="sync-token" type="password" value={config.token} onChange={field("token")} placeholder="Paste this device's key" style={inputStyle} autoComplete="new-password" spellCheck={false} />
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: "8px", margin: "6px 0 6px 0" }}><span style={{ ...labelStyle, marginBottom: 0 }}>Key expires (optional)</span>
+          <input name="sync-expires" type="date" value={config.tokenExpires || ""} onChange={field("tokenExpires")} style={{ ...inputStyle, width: "160px", padding: "5px 8px", fontSize: "13px" }} />
         </label>
         <p style={{ fontSize: "12px", color: savedToken ? "#059669" : "#AEAEA6", margin: "0 0 18px 0" }}>
           {savedToken ? "A key is saved on this device." : "No key saved on this device."}
@@ -4747,7 +4849,20 @@ async function gitBlobSha(bytes) {
 }
 
 class SyncHttpError extends Error {
-  constructor(status) { super(`GitHub error ${status}`); this.status = status; }
+  constructor(status, res) {
+    super(`GitHub error ${status}`);
+    this.status = status;
+    this.rateLimited = status === 429 || (status === 403 && res?.headers?.get("x-ratelimit-remaining") === "0");
+  }
+}
+
+// GitHub sends the key's expiry as "2027-11-01 04:00:00 UTC" when the
+// browser is allowed to read it. Returns "YYYY-MM-DD" or null.
+function readTokenExpiry(res) {
+  const raw = res?.headers?.get("github-authentication-token-expiration");
+  if (!raw) return null;
+  const d = new Date(raw.replace(" UTC", "Z").replace(" ", "T"));
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().split("T")[0];
 }
 
 function ghUrl(config, path) {
@@ -4768,17 +4883,18 @@ async function fetchRemoteMeta(config) {
   const res = await fetch(ghUrl(config, dir), { headers: ghHeaders(config), cache: "no-store" });
   // A 404 on the repo root means the repo itself can't be reached; on a
   // subfolder it just means the folder (so the file) doesn't exist yet.
-  if (res.status === 404 && dir) return { exists: false };
-  if (!res.ok) throw new SyncHttpError(res.status);
+  const tokenExpires = readTokenExpiry(res);
+  if (res.status === 404 && dir) return { exists: false, tokenExpires };
+  if (!res.ok) throw new SyncHttpError(res.status, res);
   const list = await res.json();
   const file = Array.isArray(list) ? list.find((f) => f.name === name && f.type === "file") : null;
-  return file ? { exists: true, sha: file.sha, size: file.size } : { exists: false };
+  return file ? { exists: true, sha: file.sha, size: file.size, tokenExpires } : { exists: false, tokenExpires };
 }
 
 async function fetchRemoteFile(config) {
   const res = await fetch(ghUrl(config, config.path), { headers: ghHeaders(config, "application/vnd.github.raw+json"), cache: "no-store" });
   if (res.status === 404) return null;
-  if (!res.ok) throw new SyncHttpError(res.status);
+  if (!res.ok) throw new SyncHttpError(res.status, res);
   const bytes = new Uint8Array(await res.arrayBuffer());
   return { text: new TextDecoder().decode(bytes), sha: await gitBlobSha(bytes) };
 }
@@ -4790,7 +4906,7 @@ async function putRemoteFile(config, text, sha, message) {
     body: JSON.stringify({ message, content: bytesToBase64(new TextEncoder().encode(text)), sha }),
     cache: "no-store",
   });
-  if (!res.ok) throw new SyncHttpError(res.status);
+  if (!res.ok) throw new SyncHttpError(res.status, res);
   const body = await res.json();
   return body?.content?.sha;
 }
@@ -4818,13 +4934,16 @@ const SYNC_FILE_GONE_MESSAGE = "The synced file was removed from GitHub. Sync is
 const SYNC_CONFLICT_MESSAGE = "Your notebook changed both here and on GitHub. Nothing has been overwritten.";
 const SYNC_UNSYNCED_DEVICE_MESSAGE = "GitHub already has a notebook, and this device has its own tasks that were never synced. Nothing has been overwritten.";
 
+const SYNC_KEY_REJECTED_MESSAGE = "Your GitHub key was rejected or has expired. Paste a new one in Sync settings. Your edits are saved on this device in the meantime.";
+
 function errorStatus(e) {
   if (e instanceof SyncHttpError) {
-    if (e.status === 401) return { kind: "error", message: "Not synced: GitHub didn't accept the key. Check ⚙ Sync." };
-    if (e.status === 403 || e.status === 404) return { kind: "error", message: "Not synced: the key can't reach that repo. Check ⚙ Sync." };
-    return { kind: "error", message: `Not synced: GitHub error ${e.status}. Working locally.` };
+    if (e.status === 401) return { kind: "auth", message: SYNC_KEY_REJECTED_MESSAGE };
+    if (e.rateLimited) return { kind: "error", message: "GitHub is limiting requests right now. Sync will try again in a few minutes; your edits are saved on this device." };
+    if (e.status === 403 || e.status === 404) return { kind: "error", message: "This key doesn't have access to the notebook's repo. Check the key's repository access on GitHub, then Sync settings. Your edits are saved on this device." };
+    return { kind: "error", message: `GitHub had a problem (error ${e.status}). Sync will try again; your edits are saved on this device.` };
   }
-  return { kind: "offline", message: "Not synced: can't reach GitHub. Working locally." };
+  return { kind: "offline", message: "You're offline. Edits are saved on this device and will sync when you're back online." };
 }
 
 /* ─── Merge (v1.8.4, sync Stage 4) ───
@@ -4984,6 +5103,8 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
   // conflict: { legacy, remoteSha, remote, base, local, localHash, merge, notice } | null
   const [conflict, setConflict] = useState(null);
   const [conflictOpen, setConflictOpen] = useState(false);
+  const [unsaved, setUnsaved] = useState(false);       // local edits GitHub doesn't have yet
+  const [tokenExpires, setTokenExpires] = useState(null); // "YYYY-MM-DD" or null
   const cfgRef = useRef(null);
   const stateRef = useRef(null);       // { target, sha, hash } last synced with GitHub
   const contentRef = useRef("");
@@ -5016,6 +5137,15 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
     stateRef.current = { target: syncTargetId(cfg), sha, hash: hashString(content) };
     saveSyncState(stateRef.current);
     saveSyncBase(cfg, sha, content);
+    setUnsaved(hashString(contentRef.current) !== stateRef.current.hash);
+  };
+
+  // Remember the key's expiry date when GitHub tells us.
+  const noteTokenExpiry = (cfg, date) => {
+    if (!date || cfg.tokenExpires === date) return;
+    cfg.tokenExpires = date;
+    saveSyncConfig({ ...loadSyncConfig(), tokenExpires: date });
+    setTokenExpires(date);
   };
 
   const applyLocal = (nb, content) => {
@@ -5137,6 +5267,7 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
     try {
       const meta = await fetchRemoteMeta(cfg);
       if (cfgRef.current !== cfg) return;
+      noteTokenExpiry(cfg, meta.tokenExpires);
       if (!meta.exists) {
         missingRef.current = true;
         if (conflictRef.current) clearConflict();
@@ -5252,9 +5383,14 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
     contentRef.current = notebookContentString(data);
     dataRef.current = data;
     const cfg = cfgRef.current;
+    const hash = stateRef.current ? hashString(contentRef.current) : null;
+    setUnsaved(!!stateRef.current && hash !== stateRef.current.hash);
     if (!isSyncConfigured(cfg) || !readyRef.current || pausedRef.current || missingRef.current || !stateRef.current) return;
-    if (hashString(contentRef.current) === stateRef.current.hash) return;
-    setKind("pending");
+    if (hash === stateRef.current.hash) return;
+    // While offline or the key is rejected, keep the badge (edits are
+    // marked unsaved) but still try: a save attempt is how we notice the
+    // connection is back.
+    setStatus((st) => (st.kind === "offline" || st.kind === "auth" || st.kind === "error" ? st : { kind: "pending", message: "" }));
     schedule();
   }, [data.currentDay, data.categories, data.todayTasks, data.backlogTasks, data.somedayTasks, data.futureTasks, data.ongoingTasks, data.recurringTemplates]);
 
@@ -5263,14 +5399,16 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
     const cfg = loadSyncConfig();
     const prev = cfgRef.current;
     const same = prev && prev.token === cfg.token && syncTargetId(prev) === syncTargetId(cfg);
-    if (same) return;
+    setTokenExpires(isSyncConfigured(cfg) ? cfg.tokenExpires || null : null);
+    if (same) { prev.tokenExpires = cfg.tokenExpires; return; }
     cfgRef.current = cfg;
     clearTimeout(timerRef.current);
     clearConflict();
     missingRef.current = false;
     readyRef.current = false;
-    if (!isSyncConfigured(cfg)) { stateRef.current = null; setKind("local"); return; }
+    if (!isSyncConfigured(cfg)) { stateRef.current = null; setUnsaved(false); setKind("local"); return; }
     stateRef.current = loadSyncState(cfg);
+    setUnsaved(!!stateRef.current && hashString(contentRef.current) !== stateRef.current.hash);
     pull();
   }, [configVersion]);
 
@@ -5284,20 +5422,49 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
       if (document.visibilityState === "hidden") { if (timerRef.current) save(); }
       else onVisible();
     };
+    // Back online: sync right away (merge or review screen as usual).
+    const onOnline = () => { if (!pausedRef.current) pull(); };
     window.addEventListener("focus", onVisible);
     document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", onOnline);
     return () => {
       window.removeEventListener("focus", onVisible);
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", onOnline);
       clearTimeout(timerRef.current);
     };
   }, []);
 
   return {
-    status, refresh: () => pull(true),
+    status, unsaved, tokenExpires, refresh: () => pull(true),
     conflict, conflictOpen, openConflict: () => setConflictOpen(true),
     resolveConflict, takeRemoteCopy, cancelConflict,
   };
+}
+
+/* ─── Key expiry reminder (v1.8.5) ───
+   Starts 14 days before the key's expiry date (from GitHub's header when the
+   browser can read it, or the date typed in Sync settings). Dismissing hides
+   it for the rest of the day. */
+const KEY_REMINDER_DAYS = 14;
+const KEY_REMINDER_DISMISS_KEY = TEST_MODE ? "newday-key-reminder-dismissed-TEST" : "newday-key-reminder-dismissed";
+
+function daysUntil(dateStr) {
+  if (!dateStr) return null;
+  const ms = new Date(dateStr + "T12:00:00") - new Date(realTodayStr() + "T12:00:00");
+  return Number.isNaN(ms) ? null : Math.round(ms / 86400000);
+}
+
+function useKeyExpiryReminder(tokenExpires) {
+  const [dismissedOn, setDismissedOn] = useState(() => { try { return localStorage.getItem(KEY_REMINDER_DISMISS_KEY); } catch (e) { return null; } });
+  const days = daysUntil(tokenExpires);
+  const show = days !== null && days <= KEY_REMINDER_DAYS && dismissedOn !== realTodayStr();
+  const dismiss = () => {
+    const today = realTodayStr();
+    try { localStorage.setItem(KEY_REMINDER_DISMISS_KEY, today); } catch (e) { /* ignore */ }
+    setDismissedOn(today);
+  };
+  return { show, days, dismiss };
 }
 
 /* ─── App update check ───
@@ -5358,7 +5525,8 @@ const SYNC_STATUS_LABELS = {
   saving: { text: "Saving…", color: "#B45309", dot: "#F59E0B", title: "Saving to GitHub." },
   paused: { text: "Sync paused", color: "#B91C1C", dot: "#EF4444", title: "Sync is paused. Your edits are safe on this device." },
   conflict: { text: "Needs review", color: "#B91C1C", dot: "#EF4444", title: "Changes on both sides need your review." },
-  offline: { text: "Not synced", color: "#B45309", dot: "#F59E0B", title: "Can't reach GitHub. Working locally." },
+  offline: { text: "Offline", color: "#B45309", dot: "#F59E0B", title: "Can't reach GitHub. Working locally." },
+  auth: { text: "Key problem", color: "#B91C1C", dot: "#EF4444", title: SYNC_KEY_REJECTED_MESSAGE },
   error: { text: "Not synced", color: "#B91C1C", dot: "#EF4444", title: "GitHub returned an error. Working locally." },
 };
 
@@ -5694,6 +5862,8 @@ function TodoApp() {
   });
   const update = useUpdateCheck();
   const syncLabel = SYNC_STATUS_LABELS[sync.status.kind] || SYNC_STATUS_LABELS.local;
+  const syncUnsavedNote = sync.unsaved && ["offline", "auth", "error"].includes(sync.status.kind) ? " · unsaved" : "";
+  const keyReminder = useKeyExpiryReminder(sync.tokenExpires);
 
   const handleImport = (e) => {
     const file = e.target.files?.[0];
@@ -5986,7 +6156,7 @@ function TodoApp() {
             <span data-testid="sync-indicator" data-kind={sync.status.kind} title={sync.status.message || syncLabel.title}
               style={{ fontSize: "11px", fontWeight: 600, color: syncLabel.color, display: "flex", alignItems: "center", gap: "4px", padding: "0 4px", userSelect: "none" }}>
               <span style={{ width: "7px", height: "7px", borderRadius: "50%", backgroundColor: syncLabel.dot, display: "inline-block" }} />
-              {syncLabel.text}
+              {syncLabel.text}{syncUnsavedNote}
             </span>
             <button onClick={() => { sync.refresh(); update.check(true); }} title="Check GitHub and the app for updates"
               style={{
@@ -6026,6 +6196,29 @@ function TodoApp() {
       {sync.status.kind === "paused" && (
         <div data-testid="sync-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5 }}>
           {sync.status.message}
+        </div>
+      )}
+      {sync.status.kind === "auth" && (
+        <div data-testid="key-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5, display: "flex", alignItems: "center", gap: "10px" }}>
+          <span style={{ flex: 1 }}>{sync.status.message}</span>
+          <button data-testid="open-sync" onClick={() => setSyncOpen(true)} style={{ ...smallBtnStyle, color: "#991B1B", borderColor: "#FECACA" }}>Open Sync settings</button>
+        </div>
+      )}
+      {(sync.status.kind === "offline" || sync.status.kind === "error") && (
+        <div data-testid="sync-error-note" style={{ maxWidth: "780px", margin: "-12px auto 16px", fontSize: "12px", color: sync.status.kind === "offline" ? "#B45309" : "#B91C1C", textAlign: "right" }}>
+          {sync.status.message}
+        </div>
+      )}
+      {keyReminder.show && sync.status.kind !== "auth" && (
+        <div data-testid="expiry-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FFFBEB", color: "#92400E", fontSize: "13px", lineHeight: 1.5, display: "flex", alignItems: "center", gap: "10px" }}>
+          <span style={{ flex: 1 }}>
+            {keyReminder.days < 0 ? `Your GitHub key expired on ${formatDate(sync.tokenExpires)}.`
+              : keyReminder.days === 0 ? "Your GitHub key expires today."
+              : `Your GitHub key expires in ${keyReminder.days} day${keyReminder.days === 1 ? "" : "s"} (${formatDate(sync.tokenExpires)}).`}
+            {" "}Make a new one on GitHub and paste it in Sync settings.
+          </span>
+          <button onClick={() => setSyncOpen(true)} style={{ ...smallBtnStyle, color: "#92400E", borderColor: "#FDE68A" }}>Sync settings</button>
+          <button data-testid="expiry-dismiss" onClick={keyReminder.dismiss} style={{ ...smallBtnStyle, color: "#92400E", borderColor: "#FDE68A" }}>Not today</button>
         </div>
       )}
       {sync.status.kind === "conflict" && !sync.conflictOpen && (

@@ -7,12 +7,12 @@
  * deploy is always picked up when online — this matches the repo's "always
  * latest" goal and avoids the classic PWA trap of users getting stuck on a
  * stale cached build. The cache is only a fallback for when the network is
- * unavailable. Only same-origin GETs are cached; the cross-origin CDN scripts
- * (React / Babel) are always fetched live, so a cold offline start still needs
- * a connection to load those libraries. Full offline would require caching the
- * CDN assets too — deliberately left out for now.
+ * unavailable. Same-origin GETs are cached as they load; the versioned CDN
+ * files (React / Babel / fonts) are cache-first so the app can open offline
+ * once it has been opened online. GitHub API calls are never touched.
  */
-const CACHE = "newday-shell-v2";
+const CACHE = "newday-shell-v3";
+const CDN_HOSTS = ["cdnjs.cloudflare.com", "fonts.googleapis.com", "fonts.gstatic.com"];
 const SHELL = [
   "./",
   "./index.html",
@@ -21,10 +21,24 @@ const SHELL = [
   "./icon-512.png",
 ];
 
+// The library files the page loads from the CDN, fetched at install so the
+// app can open offline even right after this worker is first installed.
+const CDN_FILES = [
+  "https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js",
+];
+
 self.addEventListener("install", (event) => {
   self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE).then((cache) => cache.addAll(SHELL)).catch(() => {})
+    caches.open(CACHE).then((cache) => Promise.all([
+      cache.addAll(SHELL).catch(() => {}),
+      ...CDN_FILES.map((u) => {
+        const r = new Request(u, { mode: "no-cors" });
+        return fetch(r).then((res) => cache.put(r, res)).catch(() => {});
+      }),
+    ]))
   );
 });
 
@@ -42,10 +56,24 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
-  // Only this site's own files. Cross-origin requests (React/Babel CDN, the
-  // GitHub API for sync) go straight to the network, so an offline API call
-  // fails cleanly instead of being answered with a cached page.
-  if (new URL(req.url).origin !== self.location.origin) return;
+  const url = new URL(req.url);
+  // Versioned library files (React, Babel) and fonts never change at a given
+  // URL: serve them from the cache when present so the app opens offline.
+  if (CDN_HOSTS.includes(url.hostname)) {
+    event.respondWith(
+      caches.open(CACHE).then((cache) =>
+        cache.match(req).then((hit) => hit || fetch(req).then((res) => {
+          if (res && (res.ok || res.type === "opaque")) cache.put(req, res.clone()).catch(() => {});
+          return res;
+        }))
+      )
+    );
+    return;
+  }
+  // Every other cross-origin request (the GitHub API for sync) goes straight
+  // to the network, so an offline API call fails cleanly instead of being
+  // answered with a cached page.
+  if (url.origin !== self.location.origin) return;
   // Pages are always revalidated with the server (cache: "no-cache"), so a
   // reload never gets a stale copy from the browser's HTTP cache. A
   // navigation Request can't be cloned with options, so rebuild it by URL.
