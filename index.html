@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NewDay Notebook v1.8.2</title>
+  <title>NewDay Notebook v1.8.3</title>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="NewDay Notebook">
@@ -17,7 +17,7 @@
     // Guarded + silent-fail so file:// opens and unsupported contexts are harmless.
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('./sw.js').catch(function () {});
+        navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).catch(function () {});
       });
     }
   </script>
@@ -35,7 +35,7 @@
     const { useState, useRef, useCallback, useEffect } = React;
 
 /**
- * NewDay Notebook v1.8.2
+ * NewDay Notebook v1.8.3
  * A daily task management app with Daily/Future Notebook workflow,
  * multi-tag system, task database, and tag manager.
  * Features: Ongoing tasks with sort (custom/priority/recent),
@@ -79,6 +79,14 @@
  * The settings (including the key) live only in this device's localStorage
  * under their own key, never in the notebook data or exports. Tasks are
  * still loaded and saved only in localStorage; GitHub sync comes later.
+ * v1.8.3 (sync Stage 3): when Sync settings are filled in, the notebook is
+ * pulled from GitHub on open, on focus, and with ⟳ Refresh, and saved ~2 s
+ * after edits stop. localStorage stays the local cache. If both sides
+ * changed, sync pauses and nothing is overwritten (conflict screen comes in
+ * Stage 4). A missing file is never created (import step). Header shows a
+ * sync status. The app now checks for a newer deployed version and offers
+ * a reload; the service worker revalidates pages instead of trusting the
+ * browser cache.
  * Last updated: 2026-11-01
  */
 
@@ -94,6 +102,9 @@
    ═══════════════════════════════════════════ */
 
 const TEST_MODE = false;
+
+// Shown in the header and compared against the deployed page to offer a reload.
+const APP_VERSION = "1.8.3";
 
 /* ═══════════════════════════════════════════
    DATA MODEL & HELPERS
@@ -4642,6 +4653,417 @@ function SyncSettingsPanel({ onClose }) {
 }
 
 /* ═══════════════════════════════════════════
+   GITHUB SYNC ENGINE (v1.8.3, sync Stage 3)
+   ───────────────────────────────────────────
+   When Sync settings are filled in, the notebook is pulled from and saved
+   to the configured file through the GitHub contents API. localStorage is
+   still written on every change as the local cache and fallback.
+
+   - Pull: list the file's folder for its SHA (cheap, no 1 MB limit); if it
+     differs from the SHA this device last synced, download the file with
+     the raw media type (works past 1 MB) and verify its SHA locally.
+   - Save: ~2 s after edits stop (and right away when the window is
+     hidden), PUT the whole file with the last-known SHA.
+   - Safety until the conflict screen exists: if GitHub and this device both
+     changed (SHA mismatch on save, or remote changed while local edits are
+     unsaved), nothing is written on either side and sync pauses.
+   - If the file doesn't exist yet, nothing is created (that is the import
+     step); the app keeps working locally.
+   Sync bookkeeping (last SHA + a hash of the last-synced content) lives in
+   its own localStorage key, never in the notebook data or exports.
+   ═══════════════════════════════════════════ */
+
+const SYNC_STATE_KEY = TEST_MODE ? "newday-sync-state-TEST" : "newday-sync-state";
+const SYNC_DEBOUNCE_MS = 2000;
+const SYNC_FOCUS_THROTTLE_MS = 5000;
+const SYNC_DEVICE = typeof navigator !== "undefined" && /iPhone|iPad|Android/i.test(navigator.userAgent) ? "phone" : "mac";
+
+function isSyncConfigured(c) {
+  return !!(c && c.token && c.owner && c.repo && c.path);
+}
+
+function syncTargetId(c) {
+  return `${c.owner}/${c.repo}/${c.path}`;
+}
+
+function loadSyncState(config) {
+  try {
+    const s = JSON.parse(localStorage.getItem(SYNC_STATE_KEY) || "null");
+    return s && s.target === syncTargetId(config) && s.sha && s.hash ? s : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveSyncState(s) {
+  try { localStorage.setItem(SYNC_STATE_KEY, JSON.stringify(s)); } catch (e) { /* ignore */ }
+}
+
+// The notebook content that sync compares, in a fixed key order. The file
+// itself also carries version and the sync block; those are not "content".
+function notebookContentString(d) {
+  return JSON.stringify({
+    currentDay: d.currentDay, categories: d.categories,
+    todayTasks: d.todayTasks, backlogTasks: d.backlogTasks, somedayTasks: d.somedayTasks,
+    futureTasks: d.futureTasks, ongoingTasks: d.ongoingTasks, recurringTemplates: d.recurringTemplates,
+  });
+}
+
+// cyrb53: fast 53-bit string hash, used only to tell "same content or not".
+function hashString(str) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36) + ":" + str.length;
+}
+
+function bytesToBase64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// Git blob SHA of the exact bytes downloaded, so the SHA always matches the
+// content we read even if the file changes between two requests.
+async function gitBlobSha(bytes) {
+  const header = new TextEncoder().encode(`blob ${bytes.length}\0`);
+  const buf = new Uint8Array(header.length + bytes.length);
+  buf.set(header, 0);
+  buf.set(bytes, header.length);
+  const digest = await crypto.subtle.digest("SHA-1", buf);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+class SyncHttpError extends Error {
+  constructor(status) { super(`GitHub error ${status}`); this.status = status; }
+}
+
+function ghUrl(config, path) {
+  const enc = (p) => p.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  return `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${enc(path)}`;
+}
+
+function ghHeaders(config, accept) {
+  return { Authorization: `Bearer ${config.token}`, Accept: accept || "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+}
+
+// { exists, sha, size } for the configured file, via its folder listing.
+async function fetchRemoteMeta(config) {
+  const path = config.path.replace(/^\/+|\/+$/g, "");
+  const slash = path.lastIndexOf("/");
+  const dir = slash >= 0 ? path.slice(0, slash) : "";
+  const name = slash >= 0 ? path.slice(slash + 1) : path;
+  const res = await fetch(ghUrl(config, dir), { headers: ghHeaders(config), cache: "no-store" });
+  // A 404 on the repo root means the repo itself can't be reached; on a
+  // subfolder it just means the folder (so the file) doesn't exist yet.
+  if (res.status === 404 && dir) return { exists: false };
+  if (!res.ok) throw new SyncHttpError(res.status);
+  const list = await res.json();
+  const file = Array.isArray(list) ? list.find((f) => f.name === name && f.type === "file") : null;
+  return file ? { exists: true, sha: file.sha, size: file.size } : { exists: false };
+}
+
+async function fetchRemoteFile(config) {
+  const res = await fetch(ghUrl(config, config.path), { headers: ghHeaders(config, "application/vnd.github.raw+json"), cache: "no-store" });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new SyncHttpError(res.status);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  return { text: new TextDecoder().decode(bytes), sha: await gitBlobSha(bytes) };
+}
+
+async function putRemoteFile(config, text, sha, message) {
+  const res = await fetch(ghUrl(config, config.path), {
+    method: "PUT",
+    headers: { ...ghHeaders(config), "Content-Type": "application/json" },
+    body: JSON.stringify({ message, content: bytesToBase64(new TextEncoder().encode(text)), sha }),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new SyncHttpError(res.status);
+  const body = await res.json();
+  return body?.content?.sha;
+}
+
+// Parse a remote file into the exact shape the app holds in state (same
+// backfills and order fields), or null if it isn't a notebook.
+function canonicalNotebook(text, fallbackDay) {
+  let data;
+  try { data = JSON.parse(text); } catch (e) { return null; }
+  if (!data || !Array.isArray(data.todayTasks) || !Array.isArray(data.backlogTasks) || !Array.isArray(data.somedayTasks) || !Array.isArray(data.categories)) return null;
+  migrateData(data);
+  return {
+    currentDay: data.currentDay || fallbackDay,
+    categories: data.categories,
+    todayTasks: assignDayOrder(data.todayTasks),
+    backlogTasks: assignBacklogOrder(data.backlogTasks),
+    somedayTasks: assignSomedayOrder(data.somedayTasks),
+    futureTasks: data.futureTasks || [],
+    ongoingTasks: assignOngoingOrder(data.ongoingTasks || []),
+    recurringTemplates: data.recurringTemplates || [],
+  };
+}
+
+const SYNC_PAUSED_MESSAGE = "Your notebook changed both on GitHub and here. Sync is paused until the conflict screen arrives in the next update. Your edits are safe on this device.";
+const SYNC_UNSYNCED_DEVICE_MESSAGE = "This device has tasks that aren't in the synced file. Sync is paused so nothing gets overwritten. Your tasks are safe on this device.";
+
+function errorStatus(e) {
+  if (e instanceof SyncHttpError) {
+    if (e.status === 401) return { kind: "error", message: "Not synced: GitHub didn't accept the key. Check ⚙ Sync." };
+    if (e.status === 403 || e.status === 404) return { kind: "error", message: "Not synced: the key can't reach that repo. Check ⚙ Sync." };
+    return { kind: "error", message: `Not synced: GitHub error ${e.status}. Working locally.` };
+  }
+  return { kind: "offline", message: "Not synced: can't reach GitHub. Working locally." };
+}
+
+// The sync controller. `data` is the current notebook (state); applyRemote
+// replaces the notebook with a canonical remote copy WITHOUT re-stamping.
+function useGitHubSync({ data, applyRemote, hadLocalData, configVersion }) {
+  const [status, setStatus] = useState({ kind: "local", message: "" });
+  const cfgRef = useRef(null);
+  const stateRef = useRef(null);       // { target, sha, hash } last synced with GitHub
+  const contentRef = useRef("");
+  const dataRef = useRef(data);
+  const busyRef = useRef(false);
+  const queuedRef = useRef(null);      // "pull" | "save" waiting for busy to clear
+  const pausedRef = useRef(false);
+  const missingRef = useRef(false);
+  const readyRef = useRef(false);      // first pull finished
+  const timerRef = useRef(null);
+  const lastPullRef = useRef(0);
+  const hadLocalRef = useRef(hadLocalData);
+  const applyRef = useRef(applyRemote);
+  applyRef.current = applyRemote;
+
+  const setKind = (kind, message = "") => setStatus((s) => (s.kind === kind && s.message === message ? s : { kind, message }));
+
+  const runQueued = () => {
+    const q = queuedRef.current;
+    queuedRef.current = null;
+    if (q === "pull") pull(); else if (q === "save") save();
+  };
+
+  const save = async () => {
+    clearTimeout(timerRef.current);
+    const cfg = cfgRef.current;
+    if (!isSyncConfigured(cfg) || pausedRef.current || missingRef.current || !readyRef.current) return;
+    if (busyRef.current) { if (!queuedRef.current) queuedRef.current = "save"; return; }
+    const st = stateRef.current;
+    if (!st) return; // never synced on this device: never push (import step does that)
+    const content = contentRef.current;
+    const hash = hashString(content);
+    if (hash === st.hash) { setKind("synced"); return; }
+    busyRef.current = true;
+    setKind("saving");
+    const d = dataRef.current;
+    const fileText = JSON.stringify({
+      version: DATA_VERSION,
+      currentDay: d.currentDay,
+      sync: { lastWriter: SYNC_DEVICE, lastWrittenAt: nowTimestamp() },
+      categories: d.categories,
+      todayTasks: d.todayTasks, backlogTasks: d.backlogTasks, somedayTasks: d.somedayTasks,
+      futureTasks: d.futureTasks, ongoingTasks: d.ongoingTasks, recurringTemplates: d.recurringTemplates,
+    }, null, 2);
+    try {
+      const newSha = await putRemoteFile(cfg, fileText, st.sha, `NewDay: ${SYNC_DEVICE} save`);
+      if (cfgRef.current !== cfg) return;
+      stateRef.current = { target: syncTargetId(cfg), sha: newSha, hash };
+      saveSyncState(stateRef.current);
+      if (hashString(contentRef.current) !== hash) { setKind("pending"); schedule(); }
+      else setKind("synced");
+    } catch (e) {
+      if (e instanceof SyncHttpError && (e.status === 409 || e.status === 422 || e.status === 404)) {
+        pausedRef.current = true;
+        setKind("paused", SYNC_PAUSED_MESSAGE);
+      } else {
+        setStatus(errorStatus(e));
+      }
+    } finally {
+      busyRef.current = false;
+      runQueued();
+    }
+  };
+
+  const schedule = () => {
+    clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(save, SYNC_DEBOUNCE_MS);
+  };
+
+  const pull = async (manual = false) => {
+    const cfg = cfgRef.current;
+    if (!isSyncConfigured(cfg)) { setKind("local"); return; }
+    if (busyRef.current) { queuedRef.current = "pull"; return; }
+    busyRef.current = true;
+    lastPullRef.current = Date.now();
+    if (manual || !readyRef.current) setKind("checking");
+    try {
+      const meta = await fetchRemoteMeta(cfg);
+      if (cfgRef.current !== cfg) return;
+      if (!meta.exists) {
+        missingRef.current = true;
+        setKind("setup", "Sync is set up. Your tasks will be uploaded in the import step.");
+        return;
+      }
+      missingRef.current = false;
+      const st = stateRef.current;
+      const localHash = hashString(contentRef.current);
+      const dirty = !st || localHash !== st.hash;
+      if (st && meta.sha === st.sha) {
+        pausedRef.current = false;
+        if (dirty) { setKind("pending"); queuedRef.current = "save"; } else setKind("synced");
+        return;
+      }
+      const remote = await fetchRemoteFile(cfg);
+      if (cfgRef.current !== cfg) return;
+      if (!remote) { missingRef.current = true; setKind("setup", "Sync is set up. Your tasks will be uploaded in the import step."); return; }
+      const canonical = canonicalNotebook(remote.text, dataRef.current.currentDay);
+      if (!canonical) {
+        pausedRef.current = true;
+        setKind("paused", "The synced file isn't a NewDay notebook. Sync is paused; your tasks are safe on this device.");
+        return;
+      }
+      const remoteContent = notebookContentString(canonical);
+      const remoteHash = hashString(remoteContent);
+      const adopt = () => {
+        stateRef.current = { target: syncTargetId(cfg), sha: remote.sha, hash: remoteHash };
+        saveSyncState(stateRef.current);
+        pausedRef.current = false;
+        setKind("synced");
+      };
+      if (remoteHash === localHash) { adopt(); return; }
+      const canTakeRemote = st ? !dirty : !hadLocalRef.current;
+      if (canTakeRemote) {
+        contentRef.current = remoteContent;
+        dataRef.current = canonical;
+        applyRef.current(canonical);
+        adopt();
+        return;
+      }
+      pausedRef.current = true;
+      setKind("paused", st ? SYNC_PAUSED_MESSAGE : SYNC_UNSYNCED_DEVICE_MESSAGE);
+    } catch (e) {
+      setStatus(errorStatus(e));
+    } finally {
+      readyRef.current = true;
+      busyRef.current = false;
+      runQueued();
+    }
+  };
+
+  // Every local change: remember it and schedule a debounced save.
+  useEffect(() => {
+    contentRef.current = notebookContentString(data);
+    dataRef.current = data;
+    const cfg = cfgRef.current;
+    if (!isSyncConfigured(cfg) || !readyRef.current || pausedRef.current || missingRef.current || !stateRef.current) return;
+    if (hashString(contentRef.current) === stateRef.current.hash) return;
+    setKind("pending");
+    schedule();
+  }, [data.currentDay, data.categories, data.todayTasks, data.backlogTasks, data.somedayTasks, data.futureTasks, data.ongoingTasks, data.recurringTemplates]);
+
+  // (Re)read settings on mount and whenever the Sync panel closes.
+  useEffect(() => {
+    const cfg = loadSyncConfig();
+    const prev = cfgRef.current;
+    const same = prev && prev.token === cfg.token && syncTargetId(prev) === syncTargetId(cfg);
+    if (same) return;
+    cfgRef.current = cfg;
+    clearTimeout(timerRef.current);
+    pausedRef.current = false;
+    missingRef.current = false;
+    readyRef.current = false;
+    if (!isSyncConfigured(cfg)) { stateRef.current = null; setKind("local"); return; }
+    stateRef.current = loadSyncState(cfg);
+    pull();
+  }, [configVersion]);
+
+  // Pull when the window comes back; save right away when it's hidden.
+  useEffect(() => {
+    const onVisible = () => {
+      if (Date.now() - lastPullRef.current < SYNC_FOCUS_THROTTLE_MS) return;
+      if (!pausedRef.current) pull();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") { if (timerRef.current) save(); }
+      else onVisible();
+    };
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisibility);
+      clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  return { status, refresh: () => pull(true) };
+}
+
+/* ─── App update check ───
+   GitHub Pages and the browser can keep serving the old page for a while,
+   so the app asks for its own page with caching bypassed and compares
+   APP_VERSION. If a newer one is deployed, a banner offers a reload that
+   fetches the new page under a fresh URL. */
+const UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+const UPDATE_CHECK_THROTTLE_MS = 60 * 1000;
+
+async function fetchDeployedVersion() {
+  if (!/^https?:$/.test(location.protocol)) return null;
+  const res = await fetch(`${location.pathname}?check=${Date.now()}`, { cache: "no-store" });
+  if (!res.ok) return null;
+  const m = (await res.text()).match(/const APP_VERSION = "([^"]+)";/);
+  return m ? m[1] : null;
+}
+
+async function reloadToVersion(version) {
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    await reg?.update();
+  } catch (e) { /* ignore */ }
+  location.replace(`${location.pathname}?v=${encodeURIComponent(version)}`);
+}
+
+function useUpdateCheck() {
+  const [newVersion, setNewVersion] = useState(null);
+  const lastRef = useRef(0);
+  const check = useCallback(async (force = false) => {
+    if (!force && Date.now() - lastRef.current < UPDATE_CHECK_THROTTLE_MS) return;
+    lastRef.current = Date.now();
+    try {
+      const v = await fetchDeployedVersion();
+      if (v && v !== APP_VERSION) setNewVersion(v);
+    } catch (e) { /* offline: try again later */ }
+  }, []);
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState !== "hidden") check(); };
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    const id = setInterval(onVisible, UPDATE_CHECK_INTERVAL_MS);
+    return () => {
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+      clearInterval(id);
+    };
+  }, [check]);
+  return { newVersion, check };
+}
+
+const SYNC_STATUS_LABELS = {
+  local: { text: "Local only", color: "#AEAEA6", dot: "#D4D4D0", title: "Sync isn't set up. Tasks are saved in this browser." },
+  checking: { text: "Checking…", color: "#8A8A86", dot: "#D4D4D0", title: "Checking GitHub for changes." },
+  setup: { text: "Sync set up", color: "#8A8A86", dot: "#93C5FD", title: "Sync is set up. Your tasks will be uploaded in the import step." },
+  synced: { text: "Synced", color: "#059669", dot: "#10B981", title: "Up to date with GitHub." },
+  pending: { text: "Unsaved", color: "#B45309", dot: "#F59E0B", title: "Changes will be saved to GitHub in a moment." },
+  saving: { text: "Saving…", color: "#B45309", dot: "#F59E0B", title: "Saving to GitHub." },
+  paused: { text: "Sync paused", color: "#B91C1C", dot: "#EF4444", title: "Sync is paused. Your edits are safe on this device." },
+  offline: { text: "Not synced", color: "#B45309", dot: "#F59E0B", title: "Can't reach GitHub. Working locally." },
+  error: { text: "Not synced", color: "#B91C1C", dot: "#EF4444", title: "GitHub returned an error. Working locally." },
+};
+
+/* ═══════════════════════════════════════════
    MAIN APP
    ═══════════════════════════════════════════ */
 
@@ -4750,6 +5172,28 @@ function TodoApp() {
   const fileInputRef = useRef(null);
   const [importStatus, setImportStatus] = useState(null);
   const [syncOpen, setSyncOpen] = useState(false);
+  const [syncConfigVersion, setSyncConfigVersion] = useState(0);
+
+  // GitHub sync (inert until Sync settings are filled in). Remote copies are
+  // set with the raw setters so their updatedAt values are kept as-is.
+  const applyRemoteNotebook = useCallback((nb) => {
+    setCurrentDay(nb.currentDay);
+    setCategories(nb.categories);
+    setTodayTasksRaw(nb.todayTasks);
+    setBacklogTasksRaw(nb.backlogTasks);
+    setSomedayTasksRaw(nb.somedayTasks);
+    setFutureTasksRaw(nb.futureTasks);
+    setOngoingTasksRaw(nb.ongoingTasks);
+    setRecurringTemplatesRaw(nb.recurringTemplates);
+  }, []);
+  const sync = useGitHubSync({
+    data: { currentDay, categories, todayTasks, backlogTasks, somedayTasks, futureTasks, ongoingTasks, recurringTemplates },
+    applyRemote: applyRemoteNotebook,
+    hadLocalData: !!saved,
+    configVersion: syncConfigVersion,
+  });
+  const update = useUpdateCheck();
+  const syncLabel = SYNC_STATUS_LABELS[sync.status.kind] || SYNC_STATUS_LABELS.local;
 
   const handleImport = (e) => {
     const file = e.target.files?.[0];
@@ -5039,6 +5483,23 @@ function TodoApp() {
               ↑ Import
             </button>
             <input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} style={{ display: "none" }} />
+            <span data-testid="sync-indicator" data-kind={sync.status.kind} title={sync.status.message || syncLabel.title}
+              style={{ fontSize: "11px", fontWeight: 600, color: syncLabel.color, display: "flex", alignItems: "center", gap: "4px", padding: "0 4px", userSelect: "none" }}>
+              <span style={{ width: "7px", height: "7px", borderRadius: "50%", backgroundColor: syncLabel.dot, display: "inline-block" }} />
+              {syncLabel.text}
+            </span>
+            <button onClick={() => { sync.refresh(); update.check(true); }} title="Check GitHub and the app for updates"
+              style={{
+                fontSize: "11px", fontWeight: 600, padding: "4px 10px", borderRadius: "6px",
+                border: "1px solid #EBEBEA", backgroundColor: "#FFFFFF", color: "#8A8A86",
+                cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: "4px",
+                transition: "background-color 0.1s, color 0.1s",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#F0F0EC"; e.currentTarget.style.color = "#5A5A56"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#FFFFFF"; e.currentTarget.style.color = "#8A8A86"; }}
+            >
+              ⟳ Refresh
+            </button>
             <button onClick={() => setSyncOpen(true)} title="Sync settings"
               style={{
                 fontSize: "11px", fontWeight: 600, padding: "4px 10px", borderRadius: "6px",
@@ -5051,11 +5512,27 @@ function TodoApp() {
             >
               ⚙ Sync
             </button>
-            <span style={{ fontSize: "10px", fontWeight: 600, color: "#C4C4C0", letterSpacing: "0.04em", marginLeft: "4px", userSelect: "none" }}>v1.8.2</span>
+            <span style={{ fontSize: "10px", fontWeight: 600, color: "#C4C4C0", letterSpacing: "0.04em", marginLeft: "4px", userSelect: "none" }}>v{APP_VERSION}</span>
           </div>
         </div>
       </div>
 
+      {update.newVersion && (
+        <div data-testid="update-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#EEF2FF", color: "#3730A3", fontSize: "13px", display: "flex", alignItems: "center", gap: "10px" }}>
+          <span style={{ flex: 1 }}>A new version of NewDay (v{update.newVersion}) is available.</span>
+          <button onClick={() => reloadToVersion(update.newVersion)} style={{ ...smallBtnStyle, color: "#3730A3", borderColor: "#C7D2FE" }}>Reload now</button>
+        </div>
+      )}
+      {sync.status.kind === "paused" && (
+        <div data-testid="sync-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5 }}>
+          {sync.status.message}
+        </div>
+      )}
+      {sync.status.kind === "setup" && (
+        <div data-testid="sync-note" style={{ maxWidth: "780px", margin: "-12px auto 16px", fontSize: "12px", color: "#AEAEA6", textAlign: "right" }}>
+          {sync.status.message}
+        </div>
+      )}
       <div style={{ maxWidth: activeTab === "database" ? "900px" : "780px", margin: "0 auto", transition: "max-width 0.2s" }}>
         {activeTab === "notebook" && (
           <NotebookTab todayTasks={todayTasks} setTodayTasks={setTodayTasks} backlogTasks={backlogTasks} setBacklogTasks={setBacklogTasks}
@@ -5084,7 +5561,7 @@ function TodoApp() {
         {activeTab === "database" && <DatabaseTab allTasks={allTasks} categories={categories} />}
         {activeTab === "tags" && <TagsTab categories={categories} setCategories={setCategories} />}
       </div>
-      {syncOpen && <SyncSettingsPanel onClose={() => setSyncOpen(false)} />}
+      {syncOpen && <SyncSettingsPanel onClose={() => { setSyncOpen(false); setSyncConfigVersion((v) => v + 1); }} />}
     </div>
   );
 }

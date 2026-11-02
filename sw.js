@@ -12,7 +12,7 @@
  * a connection to load those libraries. Full offline would require caching the
  * CDN assets too — deliberately left out for now.
  */
-const CACHE = "newday-shell-v1";
+const CACHE = "newday-shell-v2";
 const SHELL = [
   "./",
   "./index.html",
@@ -42,11 +42,22 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
+  // Only this site's own files. Cross-origin requests (React/Babel CDN, the
+  // GitHub API for sync) go straight to the network, so an offline API call
+  // fails cleanly instead of being answered with a cached page.
+  if (new URL(req.url).origin !== self.location.origin) return;
+  // Pages are always revalidated with the server (cache: "no-cache"), so a
+  // reload never gets a stale copy from the browser's HTTP cache. A
+  // navigation Request can't be cloned with options, so rebuild it by URL.
+  const isPage = req.mode === "navigate";
+  const netReq = isPage ? new Request(req.url, { cache: "no-cache", credentials: "same-origin" }) : req;
   event.respondWith(
-    fetch(req)
+    fetch(netReq)
       .then((res) => {
         // Cache successful same-origin responses for offline fallback.
-        if (res && res.ok && new URL(req.url).origin === self.location.origin) {
+        // Skip URLs with a query (update checks, ?v= reloads) so the cache
+        // doesn't fill up with one-off copies.
+        if (res && res.ok && !new URL(req.url).search) {
           const copy = res.clone();
           caches.open(CACHE).then((cache) => cache.put(req, copy)).catch(() => {});
         }
