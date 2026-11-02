@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NewDay Notebook v1.9 — TEST RIG</title>
+  <title>NewDay Notebook v1.9.1 — TEST RIG</title>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="NewDay Notebook">
@@ -35,7 +35,7 @@
     const { useState, useRef, useCallback, useEffect } = React;
 
 /**
- * NewDay Notebook v1.9
+ * NewDay Notebook v1.9.1
  * A daily task management app with Daily/Future Notebook workflow,
  * multi-tag system, task database, and tag manager.
  * Features: Ongoing tasks with sort (custom/priority/recent),
@@ -107,7 +107,12 @@
  * "Upload this device's data as the starting file". It creates notebook.json
  * only if GitHub has none (or an empty one); otherwise it asks before
  * replacing it. The badge reads "Not uploaded yet" until then.
- * Last updated: 2026-11-01
+ * v1.9.1: dates use the device's local calendar (no more "tomorrow" from
+ * 7-8 PM Eastern); toolbar is the five tabs plus status, version and a ☰
+ * menu (Export, Import, Refresh, Sync settings, Test mode); Test mode syncs
+ * notebook-test.json with its own local copies and never touches the real
+ * notebook.
+ * Last updated: 2026-11-02
  */
 
 
@@ -124,7 +129,7 @@
 const TEST_MODE = true;
 
 // Shown in the header and compared against the deployed page to offer a reload.
-const APP_VERSION = "1.9";
+const APP_VERSION = "1.9.1";
 
 /* ═══════════════════════════════════════════
    DATA MODEL & HELPERS
@@ -202,8 +207,29 @@ if (TEST_MODE) {
   } catch (e) { /* ignore */ }
 }
 
+/* ─── Local calendar dates (v1.9.1) ───
+   "What day is it" and "what day did this happen" use the device's own
+   calendar (America/New_York on the Mac), never UTC. Before v1.9.1 the app
+   took the date from toISOString(), so from 7-8 PM Eastern (midnight UTC)
+   on it thought tomorrow had started. Stored timestamps (createdDate,
+   completedDate, updatedAt, exportedAt) are still written as UTC ISO
+   strings; only the date derived from them is local. */
+function localDateStr(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+// Local calendar day of a stored ISO timestamp ("" for missing/invalid).
+function localDateOf(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : localDateStr(d);
+}
+
 function realTodayStr() {
-  return new Date().toISOString().split("T")[0];
+  return localDateStr(new Date());
 }
 
 function getClockToday() {
@@ -327,8 +353,28 @@ function randomTagColors() {
   };
 }
 
+/* ─── Test mode (v1.9.1) ───
+   A switch in the ☰ menu. When on, the app syncs newday-data's
+   notebook-test.json instead of notebook.json and keeps its own local
+   copies (notebook cache, sync state, sync base) under "-testmode" keys, so
+   the real notebook and its sync bookkeeping are never read or written.
+   The flag lives in its own key; flipping it reloads the page so every
+   storage key below is chosen once, at load. */
+const TEST_DATA_FLAG_KEY = TEST_MODE ? "newday-test-mode-TEST" : "newday-test-mode";
+const TEST_NOTEBOOK_PATH = "notebook-test.json";
+const TEST_DATA_MODE = (() => { try { return localStorage.getItem(TEST_DATA_FLAG_KEY) === "on"; } catch (e) { return false; } })();
+const STORAGE_SUFFIX = (TEST_MODE ? "-TEST" : "") + (TEST_DATA_MODE ? "-testmode" : "");
+
+function setTestDataMode(on) {
+  try {
+    if (on) localStorage.setItem(TEST_DATA_FLAG_KEY, "on");
+    else localStorage.removeItem(TEST_DATA_FLAG_KEY);
+  } catch (e) { /* ignore */ }
+  location.reload();
+}
+
 /* ─── localStorage persistence ─── */
-const STORAGE_KEY = TEST_MODE ? "newday-notebook-TEST" : "newday-notebook";
+const STORAGE_KEY = "newday-notebook" + STORAGE_SUFFIX;
 const DATA_VERSION = 6;
 
 /* ─── v6: per-item sync fields ───
@@ -482,7 +528,7 @@ function migrateData(data) {
 function groupByCreatedDate(tasks) {
   const groups = {};
   tasks.forEach((t) => {
-    const key = t.createdDate ? t.createdDate.split("T")[0] : "No date";
+    const key = t.createdDate ? localDateOf(t.createdDate) || "No date" : "No date";
     if (!groups[key]) groups[key] = [];
     groups[key].push(t);
   });
@@ -869,7 +915,7 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
   const [editTitle, setEditTitle] = useState(task.title);
   const [editDesc, setEditDesc] = useState(task.description);
   const [editDueDate, setEditDueDate] = useState(task.dueDate);
-  const [editCompletedDate, setEditCompletedDate] = useState(task.completedDate ? task.completedDate.split("T")[0] : "");
+  const [editCompletedDate, setEditCompletedDate] = useState(localDateOf(task.completedDate));
   const [editOngoing, setEditOngoing] = useState(!!task.ongoing);
   const [editStatus, setEditStatus] = useState(task.status || "");
   const [editStatusNote, setEditStatusNote] = useState(task.statusNote || "");
@@ -883,6 +929,15 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
   const editOngoingRef = useRef(editOngoing);
   const editStatusRef = useRef(editStatus);
   const editStatusNoteRef = useRef(editStatusNote);
+  const latestTaskRef = useRef(task);
+  latestTaskRef.current = task;
+  // Completed-date field -> stored value. If the day wasn't changed, keep the
+  // original timestamp; otherwise store noon UTC of the picked day (v1.9.1).
+  const keepCompletedDate = (cd) => {
+    if (!cd) return null;
+    const cur = latestTaskRef.current.completedDate;
+    return cur && localDateOf(cur) === cd ? cur : cd + "T12:00:00.000Z";
+  };
   const editRemindersRef = useRef(editReminders);
   editRemindersRef.current = editReminders;
   // Only write reminders when they were actually changed in the editor, so
@@ -913,7 +968,7 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
               title: editTitleRef.current.trim() || task.title,
               description: editDescRef.current.trim(),
               dueDate: isOngoing ? "" : newDueDate,
-              completedDate: cd ? cd + "T12:00:00.000Z" : null,
+              completedDate: keepCompletedDate(cd),
               completed: !!cd,
               ongoing: isOngoing,
               status: editStatusRef.current || null,
@@ -944,7 +999,7 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
     setEditTitle(task.title);
     setEditDesc(task.description);
     setEditDueDate(task.dueDate);
-    setEditCompletedDate(task.completedDate ? task.completedDate.split("T")[0] : "");
+    setEditCompletedDate(localDateOf(task.completedDate));
     setEditOngoing(!!task.ongoing);
     setEditStatus(task.status || "");
     setEditStatusNote(task.statusNote || "");
@@ -958,7 +1013,7 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
       title: editTitle.trim() || task.title,
       description: editDesc.trim(),
       dueDate: isOngoing ? "" : editDueDate,
-      completedDate: cd ? cd + "T12:00:00.000Z" : null,
+      completedDate: keepCompletedDate(cd),
       completed: !!cd,
       ongoing: isOngoing,
       status: editStatus || null,
@@ -990,7 +1045,7 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
   };
   const handleCancel = () => {
     setEditTitle(task.title); setEditDesc(task.description); setEditDueDate(task.dueDate);
-    setEditCompletedDate(task.completedDate ? task.completedDate.split("T")[0] : "");
+    setEditCompletedDate(localDateOf(task.completedDate));
     setEditOngoing(!!task.ongoing);
     setEditStatus(task.status || "");
     setEditStatusNote(task.statusNote || "");
@@ -4616,6 +4671,12 @@ function loadSyncConfig() {
   }
 }
 
+// The settings the sync engine uses: in test mode the same repo and key,
+// but always the test file.
+function effectiveSyncConfig(c) {
+  return TEST_DATA_MODE ? { ...c, path: TEST_NOTEBOOK_PATH } : c;
+}
+
 function saveSyncConfig(config) {
   try {
     localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
@@ -4703,7 +4764,7 @@ function SyncSettingsPanel({ onClose, onUpload }) {
   const handleTest = async () => {
     setTesting(true);
     setStatus({ ok: true, message: "Checking…" });
-    const result = await testSyncConnection(cleaned());
+    const result = await testSyncConnection(effectiveSyncConfig(cleaned()));
     if (result.tokenExpires) setConfig((c) => ({ ...c, tokenExpires: result.tokenExpires }));
     setTesting(false);
     setStatus(result);
@@ -4723,7 +4784,7 @@ function SyncSettingsPanel({ onClose, onUpload }) {
     let r = await onUpload(c, false);
     if (r && r.exists) {
       const size = r.size >= 1024 ? Math.round(r.size / 1024).toLocaleString() + " KB" : r.size + " bytes";
-      const replace = window.confirm(`GitHub already has a notebook at ${c.path} (${size}).\n\nReplace it with this device's tasks? GitHub keeps the old version in the file's history.`);
+      const replace = window.confirm(`GitHub already has a notebook at ${effectiveSyncConfig(c).path} (${size}).\n\nReplace it with this device's tasks? GitHub keeps the old version in the file's history.`);
       r = replace ? await onUpload(c, true) : { ok: true, message: "Nothing uploaded. GitHub's notebook was left as it is." };
     }
     setUploading(false);
@@ -4749,6 +4810,11 @@ function SyncSettingsPanel({ onClose, onUpload }) {
           Where your shared notebook file lives on GitHub. Your tasks are always kept in this browser too, so you can keep working offline or if the key stops working.
           The key stays on this device and is never included in exports.
         </p>
+        {TEST_DATA_MODE && (
+          <div data-testid="sync-testmode-note" style={{ fontSize: "12px", lineHeight: 1.5, padding: "8px 12px", borderRadius: "8px", marginBottom: "14px", backgroundColor: "#FFF7ED", color: "#C2410C" }}>
+            Test mode is on: Test connection and Upload use <b>{TEST_NOTEBOOK_PATH}</b>. The settings below are your real ones.
+          </div>
+        )}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "12px" }}>
           <label><span style={labelStyle}>Owner</span>
             <input name="sync-owner" value={config.owner} onChange={field("owner")} style={inputStyle} autoComplete="off" spellCheck={false} />
@@ -4816,7 +4882,7 @@ function SyncSettingsPanel({ onClose, onUpload }) {
    its own localStorage key, never in the notebook data or exports.
    ═══════════════════════════════════════════ */
 
-const SYNC_STATE_KEY = TEST_MODE ? "newday-sync-state-TEST" : "newday-sync-state";
+const SYNC_STATE_KEY = "newday-sync-state" + STORAGE_SUFFIX;
 const SYNC_DEBOUNCE_MS = 2000;
 const SYNC_FOCUS_THROTTLE_MS = 5000;
 const SYNC_DEVICE = typeof navigator !== "undefined" && /iPhone|iPad|Android/i.test(navigator.userAgent) ? "phone" : "mac";
@@ -4934,6 +5000,8 @@ async function fetchRemoteFile(config) {
 }
 
 async function putRemoteFile(config, text, sha, message) {
+  // Test mode must never write anything but the test file.
+  if (TEST_DATA_MODE && config.path !== TEST_NOTEBOOK_PATH) throw new Error("Test mode only writes " + TEST_NOTEBOOK_PATH);
   const res = await fetch(ghUrl(config, config.path), {
     method: "PUT",
     headers: { ...ghHeaders(config), "Content-Type": "application/json" },
@@ -4975,7 +5043,7 @@ function errorStatus(e) {
   if (e instanceof SyncHttpError) {
     if (e.status === 401) return { kind: "auth", message: SYNC_KEY_REJECTED_MESSAGE };
     if (e.rateLimited) return { kind: "error", message: "GitHub is limiting requests right now. Sync will try again in a few minutes; your edits are saved on this device." };
-    if (e.status === 403 || e.status === 404) return { kind: "error", message: "This key doesn't have access to the notebook's repo. Check the key's repository access on GitHub, then Sync settings. Your edits are saved on this device." };
+    if (e.status === 403 || e.status === 404) return { kind: "error", keyIssue: true, message: "This key doesn't have access to the notebook's repo. Check the key's repository access on GitHub, then Sync settings. Your edits are saved on this device." };
     return { kind: "error", message: `GitHub had a problem (error ${e.status}). Sync will try again; your edits are saved on this device.` };
   }
   return { kind: "offline", message: "You're offline. Edits are saved on this device and will sync when you're back online." };
@@ -4994,7 +5062,7 @@ function errorStatus(e) {
    delete-vs-edit is a clash. With no base (a device that never synced),
    items present on only one side are kept and any difference is a clash.
    currentDay (New Day) and the tag categories merge the same way. */
-const SYNC_BASE_KEY = TEST_MODE ? "newday-sync-base-TEST" : "newday-sync-base";
+const SYNC_BASE_KEY = "newday-sync-base" + STORAGE_SUFFIX;
 
 function loadSyncBase(config, st) {
   if (!st) return null;
@@ -5414,7 +5482,7 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
   // the file is missing or empty, unless `overwrite` (the user confirmed).
   // Returns { exists, size } (needs asking) or { ok, message, detail? }.
   const uploadStarting = (cfgIn, overwrite) => withBusy(async () => {
-    const cfg = { ...cfgIn };
+    const cfg = effectiveSyncConfig({ ...cfgIn });
     if (!isSyncConfigured(cfg)) return { ok: false, message: "Fill in the owner, repo, file path and key first." };
     clearTimeout(timerRef.current);
     try {
@@ -5462,7 +5530,7 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
 
   // (Re)read settings on mount and whenever the Sync panel closes.
   useEffect(() => {
-    const cfg = loadSyncConfig();
+    const cfg = effectiveSyncConfig(loadSyncConfig());
     const prev = cfgRef.current;
     const same = prev && prev.token === cfg.token && syncTargetId(prev) === syncTargetId(cfg);
     setTokenExpires(isSyncConfigured(cfg) ? cfg.tokenExpires || null : null);
@@ -5506,6 +5574,68 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
     conflict, conflictOpen, openConflict: () => setConflictOpen(true),
     resolveConflict, takeRemoteCopy, cancelConflict, uploadStarting,
   };
+}
+
+/* ─── Toolbar status colour (v1.9.1) ───
+   red: key problems (rejected, no access, expired) and sync stopped;
+   orange: test mode; amber: offline, unsaved, saving, other GitHub errors;
+   green: synced. Anything else keeps its label colour (Local only, etc.). */
+const TONES = {
+  red: { dot: "#EF4444", color: "#B91C1C" },
+  orange: { dot: "#F97316", color: "#C2410C" },
+  amber: { dot: "#F59E0B", color: "#B45309" },
+  green: { dot: "#10B981", color: "#059669" },
+};
+
+function syncStatusTone(status, unsaved, keyDays, label) {
+  const k = status.kind;
+  let tone = null;
+  if (k === "auth" || (k === "error" && status.keyIssue) || k === "paused" || k === "conflict" || (keyDays !== null && keyDays < 0 && k !== "local")) tone = "red";
+  else if (TEST_DATA_MODE) tone = "orange";
+  else if (k === "offline" || k === "pending" || k === "saving" || k === "error" || (unsaved && k !== "local")) tone = "amber";
+  else if (k === "synced") tone = "green";
+  return tone ? { tone, ...TONES[tone] } : { tone: "neutral", dot: label.dot, color: label.color };
+}
+
+function MenuItem({ icon, label, hint, onClick, testId, title }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button data-testid={testId} title={title || label} role="menuitem" onClick={onClick}
+      onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{ display: "flex", alignItems: "center", gap: "10px", width: "100%", padding: "8px 10px", borderRadius: "8px", border: "none", backgroundColor: hover ? "#F5F5F3" : "transparent", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+      <span style={{ width: "18px", textAlign: "center", color: "#8A8A86", fontSize: "13px" }}>{icon}</span>
+      <span style={{ flex: 1 }}>
+        <span style={{ display: "block", fontSize: "13px", fontWeight: 500, color: "#1A1A1A" }}>{label}</span>
+        <span style={{ display: "block", fontSize: "11px", color: "#AEAEA6" }}>{hint}</span>
+      </span>
+    </button>
+  );
+}
+
+// The ☰ menu card (v1.9.1).
+function AppMenu({ onExport, onImport, onRefresh, onSync, onToggleTestMode }) {
+  return (
+    <div data-testid="app-menu" role="menu"
+      style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", width: "260px", backgroundColor: "#FFFFFF", border: "1px solid #EBEBEA", borderRadius: "12px", boxShadow: "0 12px 36px rgba(0,0,0,0.12)", padding: "6px", zIndex: 60, whiteSpace: "normal" }}>
+      <MenuItem testId="menu-export" icon="↓" label="Export backup" hint="Download a JSON copy" onClick={onExport} />
+      <MenuItem testId="menu-import" icon="↑" label="Import backup" hint="Load a JSON copy" onClick={onImport} />
+      <MenuItem testId="menu-refresh" icon="⟳" label="Refresh" hint="Check GitHub and app updates" title="Check GitHub and the app for updates" onClick={onRefresh} />
+      <MenuItem testId="menu-sync" icon="⚙" label="Sync settings" hint="Key, file, first upload" onClick={onSync} />
+      <div style={{ borderTop: "1px solid #F0F0EE", margin: "4px 0 0", padding: "8px 10px 4px" }}>
+        <button data-testid="menu-testmode" role="menuitemcheckbox" aria-checked={TEST_DATA_MODE} onClick={onToggleTestMode}
+          title={TEST_DATA_MODE ? "Turn off test mode" : "Turn on test mode"}
+          style={{ display: "flex", alignItems: "center", gap: "10px", width: "100%", padding: 0, border: "none", backgroundColor: "transparent", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+          <span style={{ flex: 1 }}>
+            <span style={{ display: "block", fontSize: "13px", fontWeight: 500, color: "#1A1A1A" }}>Test mode</span>
+            <span style={{ display: "block", fontSize: "11px", color: "#AEAEA6" }}>Use test tasks, not your real notebook</span>
+          </span>
+          <span style={{ width: "32px", height: "18px", borderRadius: "999px", backgroundColor: TEST_DATA_MODE ? "#F97316" : "#D4D4D0", position: "relative", flexShrink: 0, transition: "background-color 0.15s" }}>
+            <span style={{ position: "absolute", top: "2px", left: TEST_DATA_MODE ? "16px" : "2px", width: "14px", height: "14px", borderRadius: "50%", backgroundColor: "#FFFFFF", boxShadow: "0 1px 2px rgba(0,0,0,0.2)", transition: "left 0.15s" }} />
+          </span>
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /* ─── Key expiry reminder (v1.8.5) ───
@@ -5896,7 +6026,7 @@ function TodoApp() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `newday-notebook-backup-${getTodayStr()}.json`;
+    a.download = `${TEST_DATA_MODE ? "newday-TEST-MODE-backup" : "newday-notebook-backup"}-${getTodayStr()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -5930,6 +6060,22 @@ function TodoApp() {
   const syncLabel = SYNC_STATUS_LABELS[sync.status.kind] || SYNC_STATUS_LABELS.local;
   const syncUnsavedNote = sync.unsaved && ["offline", "auth", "error"].includes(sync.status.kind) ? " · unsaved" : "";
   const keyReminder = useKeyExpiryReminder(sync.tokenExpires);
+  const statusTone = syncStatusTone(sync.status, sync.unsaved, keyReminder.days, syncLabel);
+
+  // ☰ menu (v1.9.1): closes on an outside click or Escape.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false); };
+    const onKey = (e) => { if (e.key === "Escape") setMenuOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [menuOpen]);
+  useEffect(() => {
+    if (TEST_DATA_MODE && !document.title.startsWith("TEST · ")) document.title = "TEST · " + document.title;
+  }, []);
 
   const handleImport = (e) => {
     const file = e.target.files?.[0];
@@ -6169,12 +6315,21 @@ function TodoApp() {
       )}
 
       {/* Tab bar */}
-      <div style={{ maxWidth: activeTab === "database" ? "900px" : "780px", margin: "0 auto", position: "sticky", top: 0, backgroundColor: "#FAFAF9", zIndex: 50, borderBottom: "1px solid #EBEBEA", padding: "20px 0 0 0", marginBottom: "24px", transition: "max-width 0.2s" }}>
+      {TEST_DATA_MODE && (
+        <div data-testid="testmode-bar" style={{ position: "sticky", top: 0, zIndex: 70, height: "36px", boxSizing: "border-box", margin: "0 -20px", padding: "0 20px", backgroundColor: "#F97316", color: "#FFFFFF", fontSize: "13px", fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", gap: "14px" }}>
+          <span>TEST MODE: using test tasks</span>
+          <button data-testid="testmode-exit" onClick={() => setTestDataMode(false)}
+            style={{ fontSize: "12px", fontWeight: 600, padding: "3px 10px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.7)", backgroundColor: "transparent", color: "#FFFFFF", cursor: "pointer", fontFamily: "inherit" }}>
+            Back to my real notebook
+          </button>
+        </div>
+      )}
+      <div style={{ maxWidth: "900px", margin: "0 auto", position: "sticky", top: TEST_DATA_MODE ? "36px" : 0, backgroundColor: "#FAFAF9", zIndex: 50, borderBottom: "1px solid #EBEBEA", padding: "20px 0 0 0", marginBottom: "24px", transition: "max-width 0.2s" }}>
         <div style={{ display: "flex", alignItems: "center" }}>
           {tabs.map((tab) => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)}
               style={{
-                fontSize: "14px", fontWeight: activeTab === tab.id ? 600 : 500, padding: "10px 20px",
+                fontSize: "14px", fontWeight: activeTab === tab.id ? 600 : 500, padding: "10px 14px", whiteSpace: "nowrap",
                 border: "none", backgroundColor: "transparent", color: activeTab === tab.id ? "#1A1A1A" : "#AEAEA6",
                 cursor: "pointer", fontFamily: "inherit",
                 borderBottom: activeTab === tab.id ? "2px solid #1A1A1A" : "2px solid transparent",
@@ -6188,67 +6343,37 @@ function TodoApp() {
             </button>
           ))}
           <div style={{ flex: 1 }} />
-          <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px" }}>
+          <div ref={menuRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px", whiteSpace: "nowrap" }}>
             {importStatus && (
-              <span style={{ fontSize: "11px", fontWeight: 600, color: importStatus === "success" ? "#059669" : "#DC2626" }}>
+              <span data-testid="import-note" style={{ fontSize: "11px", fontWeight: 600, color: importStatus === "success" ? "#059669" : "#DC2626" }}>
                 {importStatus === "success" ? "✓ Imported" : "✗ Invalid file"}
               </span>
             )}
-            <button onClick={handleExport}
-              style={{
-                fontSize: "11px", fontWeight: 600, padding: "4px 10px", borderRadius: "6px",
-                border: "1px solid #EBEBEA", backgroundColor: "#FFFFFF", color: "#8A8A86",
-                cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: "4px",
-                transition: "background-color 0.1s, color 0.1s",
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#F0F0EC"; e.currentTarget.style.color = "#5A5A56"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#FFFFFF"; e.currentTarget.style.color = "#8A8A86"; }}
-            >
-              ↓ Export
-            </button>
-            <button onClick={() => fileInputRef.current?.click()}
-              style={{
-                fontSize: "11px", fontWeight: 600, padding: "4px 10px", borderRadius: "6px",
-                border: "1px solid #EBEBEA", backgroundColor: "#FFFFFF", color: "#8A8A86",
-                cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: "4px",
-                transition: "background-color 0.1s, color 0.1s",
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#F0F0EC"; e.currentTarget.style.color = "#5A5A56"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#FFFFFF"; e.currentTarget.style.color = "#8A8A86"; }}
-            >
-              ↑ Import
-            </button>
             <input ref={fileInputRef} type="file" accept=".json" onChange={handleImport} style={{ display: "none" }} />
-            <span data-testid="sync-indicator" data-kind={sync.status.kind} title={sync.status.message || syncLabel.title}
-              style={{ fontSize: "11px", fontWeight: 600, color: syncLabel.color, display: "flex", alignItems: "center", gap: "4px", padding: "0 4px", userSelect: "none" }}>
-              <span style={{ width: "7px", height: "7px", borderRadius: "50%", backgroundColor: syncLabel.dot, display: "inline-block" }} />
+            <span data-testid="sync-indicator" data-kind={sync.status.kind} data-tone={statusTone.tone} title={sync.status.message || syncLabel.title}
+              style={{ fontSize: "11px", fontWeight: 600, color: statusTone.color, display: "flex", alignItems: "center", gap: "5px", userSelect: "none" }}>
+              <span data-testid="sync-dot" style={{ width: "7px", height: "7px", borderRadius: "50%", backgroundColor: statusTone.dot, display: "inline-block" }} />
               {syncLabel.text}{syncUnsavedNote}
             </span>
-            <button onClick={() => { sync.refresh(); update.check(true); }} title="Check GitHub and the app for updates"
+            <span data-testid="app-version" style={{ fontSize: "10px", fontWeight: 600, color: "#C4C4C0", letterSpacing: "0.04em", userSelect: "none" }}>v{APP_VERSION}</span>
+            <button data-testid="menu-button" onClick={() => setMenuOpen((o) => !o)} title="Menu" aria-haspopup="menu" aria-expanded={menuOpen}
               style={{
-                fontSize: "11px", fontWeight: 600, padding: "4px 10px", borderRadius: "6px",
-                border: "1px solid #EBEBEA", backgroundColor: "#FFFFFF", color: "#8A8A86",
-                cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: "4px",
-                transition: "background-color 0.1s, color 0.1s",
+                fontSize: "15px", lineHeight: 1, fontWeight: 600, padding: "3px 10px", borderRadius: "6px",
+                border: "1px solid #EBEBEA", backgroundColor: menuOpen ? "#F0F0EC" : "#FFFFFF", color: menuOpen ? "#5A5A56" : "#8A8A86",
+                cursor: "pointer", fontFamily: "inherit", transition: "background-color 0.1s, color 0.1s",
               }}
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#F0F0EC"; e.currentTarget.style.color = "#5A5A56"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#FFFFFF"; e.currentTarget.style.color = "#8A8A86"; }}
-            >
-              ⟳ Refresh
-            </button>
-            <button onClick={() => setSyncOpen(true)} title="Sync settings"
-              style={{
-                fontSize: "11px", fontWeight: 600, padding: "4px 10px", borderRadius: "6px",
-                border: "1px solid #EBEBEA", backgroundColor: "#FFFFFF", color: "#8A8A86",
-                cursor: "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", gap: "4px",
-                transition: "background-color 0.1s, color 0.1s",
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#F0F0EC"; e.currentTarget.style.color = "#5A5A56"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#FFFFFF"; e.currentTarget.style.color = "#8A8A86"; }}
-            >
-              ⚙ Sync
-            </button>
-            <span style={{ fontSize: "10px", fontWeight: 600, color: "#C4C4C0", letterSpacing: "0.04em", marginLeft: "4px", userSelect: "none" }}>v{APP_VERSION}</span>
+              onMouseLeave={(e) => { if (!menuOpen) { e.currentTarget.style.backgroundColor = "#FFFFFF"; e.currentTarget.style.color = "#8A8A86"; } }}
+            >☰</button>
+            {menuOpen && (
+              <AppMenu
+                onExport={() => { setMenuOpen(false); handleExport(); }}
+                onImport={() => { setMenuOpen(false); fileInputRef.current?.click(); }}
+                onRefresh={() => { setMenuOpen(false); sync.refresh(); update.check(true); }}
+                onSync={() => { setMenuOpen(false); setSyncOpen(true); }}
+                onToggleTestMode={() => setTestDataMode(!TEST_DATA_MODE)}
+              />
+            )}
           </div>
         </div>
       </div>

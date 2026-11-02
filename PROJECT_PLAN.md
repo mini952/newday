@@ -10,12 +10,12 @@
 
 | Field | Value |
 |---|---|
-| Current shipped version | **v1.9** |
+| Current shipped version | **v1.9.1** |
 | In development | — (none active) |
 | Active implementation plan | `IMPLEMENTATION_PLAN.md` — holds the most recent cycle (v1.8) |
 | `DATA_VERSION` (storage schema) | 6 |
 
-**Last Updated:** November 1, 2026
+**Last Updated:** November 2, 2026
 
 ---
 
@@ -754,6 +754,12 @@ A feature release: **sync between devices through a private GitHub repo**. It wa
 **Testing:** each stage was checked in headless Chrome. Before v1.9, all stages were run against a local copy of the real notebook (591 items, 744 KB) with GitHub replaced by an in-memory fake: section counts were unchanged throughout, and no task data left the machine.
 
 **Note on numbering:** `IMPLEMENTATION_PLAN.md` had pencilled "v1.9" in for the Project Notebook. That work moves to the next version number.
+
+### v1.9.1 — November 2, 2026
+
+- **Dates follow the device's local day.** "Today" used to come from the UTC date, so after 7–8 PM Eastern the app thought it was already tomorrow: the header said "1 day ago", New Day jumped a day ahead (pulling tomorrow's Future tasks and recurring instances in early), Backlog "Created" groups and the export filename were a day off, and editing a completed task could move its completed date forward. One helper (`localDateStr`) now supplies the local date. Stored timestamps (`updatedAt`, `exportedAt`, `completedDate`) are still written as ISO/UTC.
+- **Toolbar.** The tab row keeps only the five tabs; on the right are the sync status with a coloured dot (green synced, amber offline/unsaved, red key problem, orange test mode), the version label, and a **☰** menu with Export backup, Import backup, Refresh, Sync settings and a Test mode switch. The header is 900 px wide so the tabs fit on one line. "✓ Imported" appears briefly next to the status.
+- **Test mode.** Uses `notebook-test.json` in newday-data and separate local storage keys, with an orange "TEST MODE: using test tasks" bar and a one-click way back. It can never write `notebook.json` (blocked in code and tested).
 
 ---
 

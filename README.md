@@ -16,7 +16,7 @@ The core pillars this project is being built toward:
 3. **Nothing falls through the cracks** — Backlog, Someday, Future, drift/overdue
    indicators, soft delete, and JSON export/import keep the whole picture visible.
 
-This repository is currently at **v1.9** (shipped). See `PROJECT_PLAN.md` for the
+This repository is currently at **v1.9.1** (shipped). See `PROJECT_PLAN.md` for the
 status block, the full changelog, and what's parked for future versions.
 
 ---
@@ -100,7 +100,7 @@ and set **Repository permissions → Contents** to **Read and write**. Pick an
 expiration date and note it down. Copy the key; GitHub shows it only once.
 
 ### 2. Paste it into the app
-1. Click **⚙ Sync** (top right). Owner `mini952`, Repo `newday-data`, and File
+1. Open the **☰** menu (top right) and choose **Sync settings**. Owner `mini952`, Repo `newday-data`, and File
    path `notebook.json` are already filled in.
 2. Paste the key into **Access key**.
 3. **Key expires (optional):** enter the key's expiry date. The app reminds you
@@ -111,13 +111,13 @@ expiration date and note it down. Copy the key; GitHub shows it only once.
 5. Press **Save**, then **Close**.
 
 ### 3. First upload (one time only, on the device that has your current tasks)
-1. Press **↓ Export** and keep the downloaded file as a backup (off GitHub's
+1. Choose **☰ → Export backup** and keep the downloaded file as a backup (off GitHub's
    public repo).
-2. Open **⚙ Sync** and press **Upload this device's data as the starting file**.
+2. Open **☰ → Sync settings** and press **Upload this device's data as the starting file**.
    If GitHub has no notebook yet (or an empty one), it uploads right away and
    shows how many items went into each section. If a notebook is already there,
    it asks before replacing it, and nothing changes unless you say OK.
-3. Press **Close**. The badge next to **⚙ Sync** should say **Synced**.
+3. Press **Close**. The status next to the version label should say **Synced** with a green dot.
 
 ### 4. Every other device
 Do steps 1 and 2 with that device's own key, then **Close**. The app loads the
@@ -127,15 +127,24 @@ notebook from GitHub. If that device already had tasks of its own, it asks first
 
 ### Everyday use
 - Edits save to GitHub a couple of seconds after you make them. The app checks
-  for changes when you come back to it, or when you press **⟳ Refresh**.
+  for changes when you come back to it, or when you choose **☰ → Refresh**.
 - If the same task changed on two devices, a review screen lets you pick which
   version to keep. Nothing is overwritten without asking.
 - Offline, the badge says **Offline · unsaved**. Edits stay on the device and
   sync on their own when you're back online.
 - **Key problem** means GitHub rejected the key, usually because it expired.
-  Make a new one and paste it in **⚙ Sync**.
+  Make a new one and paste it in **☰ → Sync settings**.
 - Tasks can carry reminder times (open a task, **+ Add time**). The app stores
   them and shows 🔔 with a count; Task Tracker sends the reminders.
+- The dot next to the status: **green** synced, **amber** offline or not saved
+  yet, **red** a key problem.
+
+### Test mode
+**☰ → Test mode** switches the app to a separate practice notebook
+(`notebook-test.json` in newday-data) with its own copy on this device. An orange
+**TEST MODE: using test tasks** bar stays on screen; press **Back to my real
+notebook** (or switch Test mode off) to return. Test mode never writes to
+`notebook.json`.
 
 ---
 
