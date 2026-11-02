@@ -257,13 +257,18 @@ System design should actively resist this.
 
 Avoid introducing prematurely:
 - authentication/accounts
-- cloud sync
 - collaboration
 - multi-user systems
 - backend infrastructure
-- advanced AI integrations
 - native mobile apps
 - notifications infrastructure
+
+> **Update (v1.9, November 2026).** *Cloud sync* and *AI integrations* came off
+> this list. Sync shipped in v1.9: one private GitHub repo (`newday-data`) holds
+> the notebook file, with no server or accounts beyond a per-device GitHub key.
+> AI integration is now in scope: the Task Tracker assistant reads and edits the
+> same notebook file and sends the reminders (the app itself still has no
+> notification system).
 
 Reason:
 These significantly increase complexity before the workflow model is fully stable.
