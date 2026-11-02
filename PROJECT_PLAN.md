@@ -10,12 +10,12 @@
 
 | Field | Value |
 |---|---|
-| Current shipped version | **v1.8** |
+| Current shipped version | **v1.9** |
 | In development | — (none active) |
 | Active implementation plan | `IMPLEMENTATION_PLAN.md` — holds the most recent cycle (v1.8) |
-| `DATA_VERSION` (storage schema) | 5 |
+| `DATA_VERSION` (storage schema) | 6 |
 
-**Last Updated:** July 22, 2026
+**Last Updated:** November 1, 2026
 
 ---
 
@@ -45,7 +45,7 @@ change; a working session should follow them and flag any step that looks skippe
 6. **Manifest hygiene.** When a file is added, renamed, or removed in the repo,
    update the file manifest in the Claude Project instructions to match.
 7. **`DATA_VERSION` is separate.** It tracks the localStorage schema only. Bump it
-   only on a schema change; it is currently 5.
+   only on a schema change; it is currently 6.
 
 **Optional — release tags (manual, at ship time, non-gating).** A tag marks the
 exact commit that shipped as a given version, giving a frozen snapshot without
@@ -62,7 +62,7 @@ NewDay Notebook is a personal task management app built around a daily workflow.
 
 ### Core Concept
 
-The app is centered on the idea of starting each day fresh. Tasks live in "Today," and at the end of the day, the "New Day" button lets you decide what carries forward and what gets shelved — one task at a time. The Notebook date only advances when you press New Day, giving you full control over your daily cycle.
+The app is centered on the idea of starting each day fresh. Tasks live in "Today," and at the end of the day, the "New Day" button asks what to do with each unfinished task: move it back to Today or into the Backlog (per task, or all at once). The Notebook date only advances when you press New Day, giving you full control over your daily cycle.
 
 ### Five Main Tabs
 
@@ -167,6 +167,8 @@ Each task contains the following fields:
 - `recurringParentId` — String ID linking to a RecurringTemplate (null for regular tasks)
 - `recurringStatus` — `"pending"` | `"completed"` | `"missed"` | `"skipped"` (null for regular tasks)
 - `recurringSequence` — Integer, instance number in the recurring series (null for regular tasks)
+- `updatedAt` — Full ISO timestamp of the last content change (v1.9, `DATA_VERSION` 6); used by sync. Order-only changes don't update it.
+- `reminders` — Array of ISO date-times with the US Eastern offset, e.g. `"2026-11-03T09:00:00-05:00"` (v1.9). Stored and shown only; Task Tracker sends the reminders.
 
 ### Recurring Template Data Model
 
@@ -729,5 +731,30 @@ Not a feature/bug version bump — the in-app version label stays **v1.8**. This
 - **GitHub Pages deploy.** Live at `https://mini952.github.io/newday/`, always serving the latest `main`.
 - **PWA packaging.** Added `manifest.webmanifest` and gradient sunrise icons (`icon.png` / `icon-192.png` / `icon-512.png`); wired `manifest`, `apple-touch-icon`, and `theme-color` into the HTML head.
 - **Service worker (`sw.js`).** Added to satisfy Chrome's installability requirement (a fetch handler is required for the install path) so the app installs as a standalone dock app using the sunrise icon. Network-first strategy: always prefers the live deploy when online (no stale-cache trap), with the cached shell as an offline fallback. Cross-origin CDN libraries (React/Babel) are still fetched live, so a cold offline start needs a connection. Registration is guarded and silent-fail, so `file://` opens and the test rig are unaffected.
+
+### v1.9 — November 1, 2026
+
+A feature release: **sync between devices through a private GitHub repo**. It was built and merged in six stages, with interim labels v1.8.2–v1.8.5 so each stage could be tried in the Dock app. `DATA_VERSION` 5 → 6.
+
+**Stage 1 (stayed v1.8): data v6.** Every task and recurring template gets `updatedAt` and `reminders`. Loads and imports of v5 data backfill both. Edits stamp only the items that actually changed; reordering doesn't count.
+
+**Stage 2 (v1.8.2): ⚙ Sync settings.** Owner / repo / file path / access key, plus **Test connection**. The key is stored only in this browser (its own `localStorage` key) and is never included in exports.
+
+**Stage 3 (v1.8.3): GitHub sync.** The app reads `notebook.json` (folder listing for the SHA, then the raw file, so it works past 1 MB) and writes it with the contents API, sending the last SHA. Saves go out 2 s after an edit and right away when the window is hidden; GitHub is checked again on focus and on **⟳ Refresh**. A sync badge sits next to ⚙ Sync. An update check shows a **Reload now** banner when a newer version is deployed. The service worker never touches GitHub API calls.
+
+**Stage 4 (v1.8.4): conflicts.** A three-way merge against the last-synced copy. Edits to different tasks merge automatically. When the same task changed on both sides, a review screen lets you pick per task (or all of one side), and also covers New Day run on both sides and tag-category changes. **Cancel** writes nothing and leaves a **Review changes** banner. A device with its own unsynced tasks is offered **Use GitHub's copy** (after a backup download) or **Merge both**.
+
+**Stage 5 (v1.8.5): offline, key problems, reminders.**
+- *Offline:* an **Offline · unsaved** badge; edits survive reloads and sync automatically when you're back online. The service worker caches React/Babel/fonts, so the app opens offline.
+- *Key problems:* a 401 prompt with a button to open Sync settings, plain messages for no access and rate limits, and a key-expiry reminder from 14 days before (from GitHub's header when readable, or the **Key expires** date in settings), dismissible per day.
+- *Reminder times:* add, edit, or remove several Eastern date-times per task in the add and edit forms; a 🔔 count shows on the task.
+
+**Stage 6 (v1.9): first upload and docs.** **Upload this device's data as the starting file** in Sync settings creates `notebook.json` only if GitHub has none (or an empty one). Otherwise it asks before replacing it, and it shows counts per section afterwards. Until then the badge reads **Not uploaded yet**. Also in this stage: the README sync setup guide, a README wording fix for New Day (Today or Backlog), ROADMAP (cloud sync and AI integrations removed from "Avoid for now"), and the version label bumped to v1.9.
+
+**Testing:** each stage was checked in headless Chrome. Before v1.9, all stages were run against a local copy of the real notebook (591 items, 744 KB) with GitHub replaced by an in-memory fake: section counts were unchanged throughout, and no task data left the machine.
+
+**Note on numbering:** `IMPLEMENTATION_PLAN.md` had pencilled "v1.9" in for the Project Notebook. That work moves to the next version number.
+
+---
 
 *This document should be updated with each new version of NewDay Notebook.*

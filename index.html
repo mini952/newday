@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NewDay Notebook v1.8.5</title>
+  <title>NewDay Notebook v1.9</title>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="NewDay Notebook">
@@ -35,7 +35,7 @@
     const { useState, useRef, useCallback, useEffect } = React;
 
 /**
- * NewDay Notebook v1.8.5
+ * NewDay Notebook v1.9
  * A daily task management app with Daily/Future Notebook workflow,
  * multi-tag system, task database, and tag manager.
  * Features: Ongoing tasks with sort (custom/priority/recent),
@@ -103,6 +103,10 @@
  * readable, or the date in Sync settings), dismissible per day. Reminder
  * times: add/edit/remove several Eastern date-times per task in the add and
  * edit forms (stored in `reminders`); a 🔔 count shows on the task.
+ * v1.9 (sync Stage 6, sync finished): first upload — Sync settings has
+ * "Upload this device's data as the starting file". It creates notebook.json
+ * only if GitHub has none (or an empty one); otherwise it asks before
+ * replacing it. The badge reads "Not uploaded yet" until then.
  * Last updated: 2026-11-01
  */
 
@@ -120,7 +124,7 @@
 const TEST_MODE = false;
 
 // Shown in the header and compared against the deployed page to offer a reload.
-const APP_VERSION = "1.8.5";
+const APP_VERSION = "1.9";
 
 /* ═══════════════════════════════════════════
    DATA MODEL & HELPERS
@@ -4659,9 +4663,9 @@ async function testSyncConnection({ owner, repo, path, token }) {
       const file = Array.isArray(list) ? list.find((f) => f.name === name && f.type === "file") : null;
       detail = file
         ? `Found ${cleanPath} (${file.size >= 1024 ? Math.round(file.size / 1024).toLocaleString() + " KB" : file.size + " bytes"}).`
-        : `${cleanPath} doesn't exist yet. That's expected until your tasks are uploaded.`;
+        : `${cleanPath} doesn't exist yet. Use \"Upload this device's data as the starting file\" below to create it.`;
     } else if (dirRes.status === 404) {
-      detail = `${cleanPath} doesn't exist yet. That's expected until your tasks are uploaded.`;
+      detail = `${cleanPath} doesn't exist yet. Use \"Upload this device's data as the starting file\" below to create it.`;
     } else {
       detail = `Couldn't check for ${cleanPath} (GitHub error ${dirRes.status}).`;
     }
@@ -4671,11 +4675,12 @@ async function testSyncConnection({ owner, repo, path, token }) {
   return { ok: true, tokenExpires, message: `✓ Connected to ${owner}/${repo}.`, detail };
 }
 
-function SyncSettingsPanel({ onClose }) {
+function SyncSettingsPanel({ onClose, onUpload }) {
   const [config, setConfig] = useState(loadSyncConfig);
   const [savedToken, setSavedToken] = useState(() => loadSyncConfig().token);
   const [status, setStatus] = useState(null); // { ok, message, detail? }
   const [testing, setTesting] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   const field = (k) => (e) => { setConfig((c) => ({ ...c, [k]: e.target.value })); setStatus(null); };
   const cleaned = () => ({
@@ -4702,6 +4707,27 @@ function SyncSettingsPanel({ onClose }) {
     if (result.tokenExpires) setConfig((c) => ({ ...c, tokenExpires: result.tokenExpires }));
     setTesting(false);
     setStatus(result);
+  };
+
+  // First upload (v1.9): this device's notebook becomes the file on GitHub.
+  // Goes ahead on its own only if GitHub has no notebook (or an empty file);
+  // otherwise it asks before replacing it.
+  const handleUpload = async () => {
+    const c = cleaned();
+    if (!c.token) { setStatus({ ok: false, message: "Paste an access key first." }); return; }
+    setConfig(c);
+    saveSyncConfig(c);
+    setSavedToken(c.token);
+    setUploading(true);
+    setStatus({ ok: true, message: "Uploading…" });
+    let r = await onUpload(c, false);
+    if (r && r.exists) {
+      const size = r.size >= 1024 ? Math.round(r.size / 1024).toLocaleString() + " KB" : r.size + " bytes";
+      const replace = window.confirm(`GitHub already has a notebook at ${c.path} (${size}).\n\nReplace it with this device's tasks? GitHub keeps the old version in the file's history.`);
+      r = replace ? await onUpload(c, true) : { ok: true, message: "Nothing uploaded. GitHub's notebook was left as it is." };
+    }
+    setUploading(false);
+    setStatus(r && typeof r === "object" ? r : { ok: false, message: "Sync is busy. Try again in a moment." });
   };
 
   const handleForget = () => {
@@ -4755,6 +4781,14 @@ function SyncSettingsPanel({ onClose }) {
           <button onClick={handleForget} disabled={!savedToken && !config.token} style={{ ...bulkBtnStyle, color: "#B91C1C", opacity: !savedToken && !config.token ? 0.5 : 1 }}>Forget key</button>
           <div style={{ flex: 1 }} />
           <button onClick={onClose} style={bulkBtnStyle}>Close</button>
+        </div>
+        <div data-testid="upload-box" style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid #F0F0EE" }}>
+          <p style={{ fontSize: "12px", color: "#8A8A86", margin: "0 0 10px 0", lineHeight: 1.5 }}>
+            First time only, on the device that has your current tasks: put this device's notebook on GitHub as the starting file.
+            If GitHub already has a notebook, you'll be asked before anything is replaced.
+          </p>
+          <button data-testid="upload-start" onClick={handleUpload} disabled={uploading || testing || !onUpload}
+            style={{ ...bulkBtnStyle, opacity: uploading || testing ? 0.6 : 1 }}>{uploading ? "Uploading…" : "Upload this device's data as the starting file"}</button>
         </div>
       </div>
     </div>
@@ -4934,6 +4968,7 @@ const SYNC_FILE_GONE_MESSAGE = "The synced file was removed from GitHub. Sync is
 const SYNC_CONFLICT_MESSAGE = "Your notebook changed both here and on GitHub. Nothing has been overwritten.";
 const SYNC_UNSYNCED_DEVICE_MESSAGE = "GitHub already has a notebook, and this device has its own tasks that were never synced. Nothing has been overwritten.";
 
+const SYNC_NO_FILE_MESSAGE = "GitHub has no notebook yet. On the device with your current tasks, open ⚙ Sync and press \"Upload this device's data as the starting file\".";
 const SYNC_KEY_REJECTED_MESSAGE = "Your GitHub key was rejected or has expired. Paste a new one in Sync settings. Your edits are saved on this device in the meantime.";
 
 function errorStatus(e) {
@@ -5271,7 +5306,7 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
       if (!meta.exists) {
         missingRef.current = true;
         if (conflictRef.current) clearConflict();
-        setKind("setup", "Sync is set up. Your tasks will be uploaded in the import step.");
+        setKind("setup", SYNC_NO_FILE_MESSAGE);
         return;
       }
       missingRef.current = false;
@@ -5286,7 +5321,7 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
       }
       const remote = await loadRemote(cfg);
       if (cfgRef.current !== cfg) return;
-      if (!remote) { missingRef.current = true; setKind("setup", "Sync is set up. Your tasks will be uploaded in the import step."); return; }
+      if (!remote) { missingRef.current = true; setKind("setup", SYNC_NO_FILE_MESSAGE); return; }
       if (remote.invalid) {
         pausedRef.current = true;
         setKind("paused", "The synced file isn't a NewDay notebook. Sync is paused; your tasks are safe on this device.");
@@ -5318,7 +5353,7 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
     const meta = await fetchRemoteMeta(cfg);
     if (!meta.exists) {
       clearConflict(); missingRef.current = true;
-      setKind("setup", "Sync is set up. Your tasks will be uploaded in the import step.");
+      setKind("setup", SYNC_NO_FILE_MESSAGE);
       return "error";
     }
     if (meta.sha === c.remote.sha && hashString(contentRef.current) === c.localHash) return null;
@@ -5373,6 +5408,37 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
     clearConflict();
     setKind("synced");
     return "saved";
+  });
+
+  // First upload (v1.9): write this device's notebook as the file. Only when
+  // the file is missing or empty, unless `overwrite` (the user confirmed).
+  // Returns { exists, size } (needs asking) or { ok, message, detail? }.
+  const uploadStarting = (cfgIn, overwrite) => withBusy(async () => {
+    const cfg = { ...cfgIn };
+    if (!isSyncConfigured(cfg)) return { ok: false, message: "Fill in the owner, repo, file path and key first." };
+    clearTimeout(timerRef.current);
+    try {
+      const meta = await fetchRemoteMeta(cfg);
+      noteTokenExpiry(cfg, meta.tokenExpires);
+      if (meta.exists && meta.size > 0 && !overwrite) return { exists: true, size: meta.size };
+      const d = dataRef.current;
+      const content = contentRef.current;
+      const sha = await putRemoteFile(cfg, buildSyncFileText(d), meta.exists ? meta.sha : undefined, `NewDay: ${SYNC_DEVICE} starting file`);
+      cfgRef.current = cfg;
+      missingRef.current = false;
+      readyRef.current = true;
+      clearConflict();
+      recordSynced(cfg, sha, content);
+      if (hashString(contentRef.current) !== stateRef.current.hash) { setKind("pending"); schedule(); } else setKind("synced");
+      const n = (k) => (d[k] || []).length;
+      return {
+        ok: true, message: "✓ Uploaded. This device is now synced with GitHub.",
+        detail: `Today ${n("todayTasks")} · Backlog ${n("backlogTasks")} · Someday ${n("somedayTasks")} · Future ${n("futureTasks")} · Ongoing ${n("ongoingTasks")} · Recurring ${n("recurringTemplates")}`,
+      };
+    } catch (e) {
+      if (e instanceof SyncHttpError && (e.status === 409 || e.status === 422)) return { ok: false, message: "GitHub's file changed while uploading. Nothing was replaced; press the button again." };
+      return { ok: false, message: "Couldn't upload. " + errorStatus(e).message };
+    }
   });
 
   // Close the screen without writing anything. Sync stays paused.
@@ -5438,7 +5504,7 @@ function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersio
   return {
     status, unsaved, tokenExpires, refresh: () => pull(true),
     conflict, conflictOpen, openConflict: () => setConflictOpen(true),
-    resolveConflict, takeRemoteCopy, cancelConflict,
+    resolveConflict, takeRemoteCopy, cancelConflict, uploadStarting,
   };
 }
 
@@ -5519,7 +5585,7 @@ function useUpdateCheck() {
 const SYNC_STATUS_LABELS = {
   local: { text: "Local only", color: "#AEAEA6", dot: "#D4D4D0", title: "Sync isn't set up. Tasks are saved in this browser." },
   checking: { text: "Checking…", color: "#8A8A86", dot: "#D4D4D0", title: "Checking GitHub for changes." },
-  setup: { text: "Sync set up", color: "#8A8A86", dot: "#93C5FD", title: "Sync is set up. Your tasks will be uploaded in the import step." },
+  setup: { text: "Not uploaded yet", color: "#8A8A86", dot: "#93C5FD", title: SYNC_NO_FILE_MESSAGE },
   synced: { text: "Synced", color: "#059669", dot: "#10B981", title: "Up to date with GitHub." },
   pending: { text: "Unsaved", color: "#B45309", dot: "#F59E0B", title: "Changes will be saved to GitHub in a moment." },
   saving: { text: "Saving…", color: "#B45309", dot: "#F59E0B", title: "Saving to GitHub." },
@@ -6264,7 +6330,7 @@ function TodoApp() {
         {activeTab === "database" && <DatabaseTab allTasks={allTasks} categories={categories} />}
         {activeTab === "tags" && <TagsTab categories={categories} setCategories={setCategories} />}
       </div>
-      {syncOpen && <SyncSettingsPanel onClose={() => { setSyncOpen(false); setSyncConfigVersion((v) => v + 1); }} />}
+      {syncOpen && <SyncSettingsPanel onUpload={sync.uploadStarting} onClose={() => { setSyncOpen(false); setSyncConfigVersion((v) => v + 1); }} />}
     </div>
   );
 }
