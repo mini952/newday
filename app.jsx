@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 /**
- * NewDay Notebook v1.8.3
+ * NewDay Notebook v1.8.4
  * A daily task management app with Daily/Future Notebook workflow,
  * multi-tag system, task database, and tag manager.
  * Features: Ongoing tasks with sort (custom/priority/recent),
@@ -53,6 +53,13 @@ import { useState, useRef, useCallback, useEffect } from "react";
  * sync status. The app now checks for a newer deployed version and offers
  * a reload; the service worker revalidates pages instead of trusting the
  * browser cache.
+ * v1.8.4 (sync Stage 4): conflict screen. When GitHub and this device both
+ * changed, items changed on one side merge on their own (three-way, against
+ * this device's copy of the last-synced file); items changed on both sides,
+ * including delete-vs-edit, are listed side by side for the user to pick.
+ * New Day on both sides asks which day to keep. Nothing is written until
+ * Save, which re-checks GitHub first. A never-synced device can switch to
+ * GitHub's copy (after an automatic backup download) or merge.
  * Last updated: 2026-11-01
  */
 
@@ -70,7 +77,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 const TEST_MODE = false;
 
 // Shown in the header and compared against the deployed page to offer a reload.
-const APP_VERSION = "1.8.3";
+const APP_VERSION = "1.8.4";
 
 /* ═══════════════════════════════════════════
    DATA MODEL & HELPERS
@@ -4773,8 +4780,9 @@ function canonicalNotebook(text, fallbackDay) {
   };
 }
 
-const SYNC_PAUSED_MESSAGE = "Your notebook changed both on GitHub and here. Sync is paused until the conflict screen arrives in the next update. Your edits are safe on this device.";
-const SYNC_UNSYNCED_DEVICE_MESSAGE = "This device has tasks that aren't in the synced file. Sync is paused so nothing gets overwritten. Your tasks are safe on this device.";
+const SYNC_FILE_GONE_MESSAGE = "The synced file was removed from GitHub. Sync is paused; your tasks are safe on this device.";
+const SYNC_CONFLICT_MESSAGE = "Your notebook changed both here and on GitHub. Nothing has been overwritten.";
+const SYNC_UNSYNCED_DEVICE_MESSAGE = "GitHub already has a notebook, and this device has its own tasks that were never synced. Nothing has been overwritten.";
 
 function errorStatus(e) {
   if (e instanceof SyncHttpError) {
@@ -4785,10 +4793,163 @@ function errorStatus(e) {
   return { kind: "offline", message: "Not synced: can't reach GitHub. Working locally." };
 }
 
+/* ─── Merge (v1.8.4, sync Stage 4) ───
+   Three-way merge by item id. "base" is this device's copy of the file as
+   it was at the last successful sync (its own localStorage key). For each
+   task or template, comparing content + section (order fields and
+   updatedAt don't count — position comes from list order):
+     - same on both sides            → keep it
+     - only GitHub changed vs base   → take GitHub's
+     - only this device changed      → take this device's
+     - both changed differently      → clash; the user picks
+   Deleting (soft delete, or removal from the lists) counts as a change, so
+   delete-vs-edit is a clash. With no base (a device that never synced),
+   items present on only one side are kept and any difference is a clash.
+   currentDay (New Day) and the tag categories merge the same way. */
+const SYNC_BASE_KEY = TEST_MODE ? "newday-sync-base-TEST" : "newday-sync-base";
+
+function loadSyncBase(config, st) {
+  if (!st) return null;
+  try {
+    const b = JSON.parse(localStorage.getItem(SYNC_BASE_KEY) || "null");
+    if (!b || b.target !== syncTargetId(config) || b.sha !== st.sha || typeof b.content !== "string") return null;
+    return JSON.parse(b.content);
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveSyncBase(config, sha, content) {
+  try {
+    localStorage.setItem(SYNC_BASE_KEY, JSON.stringify({ target: syncTargetId(config), sha, content }));
+  } catch (e) {
+    // Quota: drop the base rather than fail; merges then treat every
+    // difference as a clash (safe, just more questions).
+    try { localStorage.removeItem(SYNC_BASE_KEY); } catch (e2) { /* ignore */ }
+  }
+}
+
+function indexNotebookItems(nb) {
+  const m = new Map();
+  if (!nb) return m;
+  ITEM_ARRAY_KEYS.forEach((section) => (nb[section] || []).forEach((item) => {
+    if (item && item.id != null && !m.has(item.id)) m.set(item.id, { section, item });
+  }));
+  return m;
+}
+
+function mergeEntryKey(e) {
+  return e ? e.section + "|" + itemContentKey(e.item) : "∅";
+}
+
+function mergeValue(hasBase, b, l, r) {
+  const ls = JSON.stringify(l), rs = JSON.stringify(r);
+  if (ls === rs) return { value: r };
+  if (hasBase && ls === JSON.stringify(b)) return { value: r, from: "github" };
+  if (hasBase && rs === JSON.stringify(b)) return { value: l, from: "mac" };
+  return { clash: true, mac: l, github: r };
+}
+
+function mergeNotebooks(base, local, remote) {
+  const B = indexNotebookItems(base), L = indexNotebookItems(local), R = indexNotebookItems(remote);
+  const ids = [...new Set([...L.keys(), ...R.keys()])];
+  const resolved = new Map(); // id -> entry | null (removed)
+  const clashes = [];
+  let fromMac = 0, fromGithub = 0;
+  ids.forEach((id) => {
+    const b = B.get(id), l = L.get(id) || null, r = R.get(id) || null;
+    const lk = mergeEntryKey(l), rk = mergeEntryKey(r);
+    if (lk === rk) {
+      resolved.set(id, (l.item.updatedAt || "") > (r.item.updatedAt || "") ? l : r);
+      return;
+    }
+    if (base) {
+      const bk = mergeEntryKey(b);
+      if (lk === bk) { resolved.set(id, r); fromGithub++; return; }
+      if (rk === bk) { resolved.set(id, l); fromMac++; return; }
+    } else {
+      if (!l) { resolved.set(id, r); fromGithub++; return; }
+      if (!r) { resolved.set(id, l); fromMac++; return; }
+    }
+    clashes.push({ id, mac: l, github: r });
+  });
+  return {
+    resolved, clashes, fromMac, fromGithub,
+    day: mergeValue(!!base, base?.currentDay, local.currentDay, remote.currentDay),
+    categories: mergeValue(!!base, base?.categories, local.categories, remote.categories),
+  };
+}
+
+function mergeNeedsUser(m) {
+  return m.clashes.length > 0 || !!m.day.clash || !!m.categories.clash;
+}
+
+// Final list order per section: start from the side that reordered that
+// section (GitHub unless only this device did), then slot in items that
+// come from the other side after their nearest earlier neighbour.
+function mergedSection(section, finalById, base, local, remote) {
+  const ids = (nb) => (nb?.[section] || []).map((t) => t?.id);
+  const inSection = (id) => finalById.get(id)?.section === section;
+  const remoteIds = ids(remote), localIds = ids(local);
+  const remoteReordered = !base || JSON.stringify(remoteIds) !== JSON.stringify(ids(base));
+  const [primary, secondary] = remoteReordered ? [remoteIds, localIds] : [localIds, remoteIds];
+  const out = [];
+  const placed = new Set();
+  primary.forEach((id) => { if (inSection(id) && !placed.has(id)) { out.push(id); placed.add(id); } });
+  let anchor = null;
+  secondary.forEach((id) => {
+    if (placed.has(id)) { anchor = id; return; }
+    if (!inSection(id)) return;
+    const at = anchor === null ? 0 : out.indexOf(anchor) + 1;
+    out.splice(at, 0, id);
+    placed.add(id);
+    anchor = id;
+  });
+  return out.map((id) => finalById.get(id).item);
+}
+
+// choices: { [id]: "mac" | "github" }, dayChoice / catChoice likewise.
+function buildMergedNotebook(base, local, remote, m, choices, dayChoice, catChoice) {
+  const finalById = new Map();
+  m.resolved.forEach((e, id) => { if (e) finalById.set(id, e); });
+  m.clashes.forEach((c) => {
+    const e = choices[c.id] === "mac" ? c.mac : c.github;
+    if (e) finalById.set(c.id, e);
+  });
+  const pick = (v, choice) => (v.clash ? (choice === "mac" ? v.mac : v.github) : v.value);
+  const nb = { currentDay: pick(m.day, dayChoice), categories: pick(m.categories, catChoice) };
+  ITEM_ARRAY_KEYS.forEach((s) => { nb[s] = mergedSection(s, finalById, base, local, remote); });
+  return {
+    currentDay: nb.currentDay,
+    categories: nb.categories,
+    todayTasks: assignDayOrder(nb.todayTasks),
+    backlogTasks: assignBacklogOrder(nb.backlogTasks),
+    somedayTasks: assignSomedayOrder(nb.somedayTasks),
+    futureTasks: nb.futureTasks,
+    ongoingTasks: assignOngoingOrder(nb.ongoingTasks),
+    recurringTemplates: nb.recurringTemplates,
+  };
+}
+
+function buildSyncFileText(d) {
+  return JSON.stringify({
+    version: DATA_VERSION,
+    currentDay: d.currentDay,
+    sync: { lastWriter: SYNC_DEVICE, lastWrittenAt: nowTimestamp() },
+    categories: d.categories,
+    todayTasks: d.todayTasks, backlogTasks: d.backlogTasks, somedayTasks: d.somedayTasks,
+    futureTasks: d.futureTasks, ongoingTasks: d.ongoingTasks, recurringTemplates: d.recurringTemplates,
+  }, null, 2);
+}
+
 // The sync controller. `data` is the current notebook (state); applyRemote
-// replaces the notebook with a canonical remote copy WITHOUT re-stamping.
-function useGitHubSync({ data, applyRemote, hadLocalData, configVersion }) {
+// replaces the notebook with a canonical copy WITHOUT re-stamping; onBackup
+// downloads an export of the current local notebook.
+function useGitHubSync({ data, applyRemote, onBackup, hadLocalData, configVersion }) {
   const [status, setStatus] = useState({ kind: "local", message: "" });
+  // conflict: { legacy, remoteSha, remote, base, local, localHash, merge, notice } | null
+  const [conflict, setConflict] = useState(null);
+  const [conflictOpen, setConflictOpen] = useState(false);
   const cfgRef = useRef(null);
   const stateRef = useRef(null);       // { target, sha, hash } last synced with GitHub
   const contentRef = useRef("");
@@ -4803,6 +4964,9 @@ function useGitHubSync({ data, applyRemote, hadLocalData, configVersion }) {
   const hadLocalRef = useRef(hadLocalData);
   const applyRef = useRef(applyRemote);
   applyRef.current = applyRemote;
+  const backupRef = useRef(onBackup);
+  backupRef.current = onBackup;
+  const conflictRef = useRef(null);
 
   const setKind = (kind, message = "") => setStatus((s) => (s.kind === kind && s.message === message ? s : { kind, message }));
 
@@ -4810,6 +4974,84 @@ function useGitHubSync({ data, applyRemote, hadLocalData, configVersion }) {
     const q = queuedRef.current;
     queuedRef.current = null;
     if (q === "pull") pull(); else if (q === "save") save();
+  };
+
+  // Remember what GitHub and this device agree on: SHA, content hash, and
+  // the content itself (the base for the next merge).
+  const recordSynced = (cfg, sha, content) => {
+    stateRef.current = { target: syncTargetId(cfg), sha, hash: hashString(content) };
+    saveSyncState(stateRef.current);
+    saveSyncBase(cfg, sha, content);
+  };
+
+  const applyLocal = (nb, content) => {
+    contentRef.current = content;
+    dataRef.current = nb;
+    applyRef.current(nb);
+  };
+
+  const clearConflict = () => {
+    conflictRef.current = null;
+    setConflict(null);
+    setConflictOpen(false);
+    pausedRef.current = false;
+  };
+
+  const showConflict = (c) => {
+    conflictRef.current = c;
+    setConflict(c);
+    setConflictOpen(true);
+    pausedRef.current = true;
+    setKind("conflict", c.legacy ? SYNC_UNSYNCED_DEVICE_MESSAGE : SYNC_CONFLICT_MESSAGE);
+  };
+
+  // Download the remote file as a canonical notebook. null = file missing.
+  const loadRemote = async (cfg) => {
+    const remote = await fetchRemoteFile(cfg);
+    if (!remote) return null;
+    const canonical = canonicalNotebook(remote.text, dataRef.current.currentDay);
+    if (!canonical) return { invalid: true };
+    return { sha: remote.sha, canonical, content: notebookContentString(canonical) };
+  };
+
+  // Write `merged` over the remote file at `remoteSha` (skipped if it already
+  // equals the remote), then make it the local notebook. Throws on HTTP errors.
+  const commitMerged = async (cfg, merged, remote) => {
+    const content = notebookContentString(merged);
+    let sha = remote.sha;
+    if (content !== remote.content) {
+      sha = await putRemoteFile(cfg, buildSyncFileText(merged), remote.sha, `NewDay: ${SYNC_DEVICE} merge`);
+    }
+    applyLocal(merged, content);
+    recordSynced(cfg, sha, content);
+  };
+
+  // Both sides changed. Merge what can be merged; if nothing needs a
+  // decision, save it straight away; otherwise open the conflict screen.
+  // Nothing is written while the screen is open.
+  const handleDivergence = async (cfg, remote, legacy, attempt = 0) => {
+    if (!remote) { missingRef.current = true; pausedRef.current = true; setKind("paused", SYNC_FILE_GONE_MESSAGE); return; }
+    if (remote.invalid) { pausedRef.current = true; setKind("paused", "The synced file isn't a NewDay notebook. Sync is paused; your tasks are safe on this device."); return; }
+    const base = legacy ? null : loadSyncBase(cfg, stateRef.current);
+    const local = dataRef.current;
+    const localContent = contentRef.current;
+    const merge = mergeNotebooks(base, local, remote.canonical);
+    if (!legacy && !mergeNeedsUser(merge)) {
+      const merged = buildMergedNotebook(base, local, remote.canonical, merge, {}, null, null);
+      try {
+        await commitMerged(cfg, merged, remote);
+        clearConflict();
+        if (hashString(contentRef.current) !== stateRef.current.hash) { setKind("pending"); schedule(); } else setKind("synced");
+      } catch (e) {
+        if (e instanceof SyncHttpError && (e.status === 409 || e.status === 422) && attempt < 3) {
+          return handleDivergence(cfg, await loadRemote(cfg), legacy, attempt + 1);
+        }
+        if (e instanceof SyncHttpError && e.status === 404) { missingRef.current = true; pausedRef.current = true; setKind("paused", SYNC_FILE_GONE_MESSAGE); return; }
+        setStatus(errorStatus(e));
+      }
+      return;
+    }
+    showConflict({ legacy, remote, base, local, localHash: hashString(localContent), merge, notice: conflictRef.current ? conflictRef.current.notice : null });
   };
 
   const save = async () => {
@@ -4824,26 +5066,19 @@ function useGitHubSync({ data, applyRemote, hadLocalData, configVersion }) {
     if (hash === st.hash) { setKind("synced"); return; }
     busyRef.current = true;
     setKind("saving");
-    const d = dataRef.current;
-    const fileText = JSON.stringify({
-      version: DATA_VERSION,
-      currentDay: d.currentDay,
-      sync: { lastWriter: SYNC_DEVICE, lastWrittenAt: nowTimestamp() },
-      categories: d.categories,
-      todayTasks: d.todayTasks, backlogTasks: d.backlogTasks, somedayTasks: d.somedayTasks,
-      futureTasks: d.futureTasks, ongoingTasks: d.ongoingTasks, recurringTemplates: d.recurringTemplates,
-    }, null, 2);
     try {
-      const newSha = await putRemoteFile(cfg, fileText, st.sha, `NewDay: ${SYNC_DEVICE} save`);
+      const newSha = await putRemoteFile(cfg, buildSyncFileText(dataRef.current), st.sha, `NewDay: ${SYNC_DEVICE} save`);
       if (cfgRef.current !== cfg) return;
-      stateRef.current = { target: syncTargetId(cfg), sha: newSha, hash };
-      saveSyncState(stateRef.current);
+      recordSynced(cfg, newSha, content);
       if (hashString(contentRef.current) !== hash) { setKind("pending"); schedule(); }
       else setKind("synced");
     } catch (e) {
-      if (e instanceof SyncHttpError && (e.status === 409 || e.status === 422 || e.status === 404)) {
+      if (e instanceof SyncHttpError && (e.status === 409 || e.status === 422)) {
+        try { await handleDivergence(cfg, await loadRemote(cfg), false); } catch (e2) { setStatus(errorStatus(e2)); }
+      } else if (e instanceof SyncHttpError && e.status === 404) {
+        missingRef.current = true;
         pausedRef.current = true;
-        setKind("paused", SYNC_PAUSED_MESSAGE);
+        setKind("paused", SYNC_FILE_GONE_MESSAGE);
       } else {
         setStatus(errorStatus(e));
       }
@@ -4870,6 +5105,7 @@ function useGitHubSync({ data, applyRemote, hadLocalData, configVersion }) {
       if (cfgRef.current !== cfg) return;
       if (!meta.exists) {
         missingRef.current = true;
+        if (conflictRef.current) clearConflict();
         setKind("setup", "Sync is set up. Your tasks will be uploaded in the import step.");
         return;
       }
@@ -4878,38 +5114,29 @@ function useGitHubSync({ data, applyRemote, hadLocalData, configVersion }) {
       const localHash = hashString(contentRef.current);
       const dirty = !st || localHash !== st.hash;
       if (st && meta.sha === st.sha) {
+        if (conflictRef.current) clearConflict();
         pausedRef.current = false;
         if (dirty) { setKind("pending"); queuedRef.current = "save"; } else setKind("synced");
         return;
       }
-      const remote = await fetchRemoteFile(cfg);
+      const remote = await loadRemote(cfg);
       if (cfgRef.current !== cfg) return;
       if (!remote) { missingRef.current = true; setKind("setup", "Sync is set up. Your tasks will be uploaded in the import step."); return; }
-      const canonical = canonicalNotebook(remote.text, dataRef.current.currentDay);
-      if (!canonical) {
+      if (remote.invalid) {
         pausedRef.current = true;
         setKind("paused", "The synced file isn't a NewDay notebook. Sync is paused; your tasks are safe on this device.");
         return;
       }
-      const remoteContent = notebookContentString(canonical);
-      const remoteHash = hashString(remoteContent);
-      const adopt = () => {
-        stateRef.current = { target: syncTargetId(cfg), sha: remote.sha, hash: remoteHash };
-        saveSyncState(stateRef.current);
-        pausedRef.current = false;
-        setKind("synced");
-      };
-      if (remoteHash === localHash) { adopt(); return; }
+      if (remote.content === contentRef.current) { recordSynced(cfg, remote.sha, remote.content); clearConflict(); setKind("synced"); return; }
       const canTakeRemote = st ? !dirty : !hadLocalRef.current;
       if (canTakeRemote) {
-        contentRef.current = remoteContent;
-        dataRef.current = canonical;
-        applyRef.current(canonical);
-        adopt();
+        applyLocal(remote.canonical, remote.content);
+        recordSynced(cfg, remote.sha, remote.content);
+        clearConflict();
+        setKind("synced");
         return;
       }
-      pausedRef.current = true;
-      setKind("paused", st ? SYNC_PAUSED_MESSAGE : SYNC_UNSYNCED_DEVICE_MESSAGE);
+      await handleDivergence(cfg, remote, !st);
     } catch (e) {
       setStatus(errorStatus(e));
     } finally {
@@ -4918,6 +5145,73 @@ function useGitHubSync({ data, applyRemote, hadLocalData, configVersion }) {
       runQueued();
     }
   };
+
+  // Re-check before writing: if GitHub or this device changed since the
+  // screen was built, rebuild it (choices are kept) instead of writing.
+  // Returns "saved" | "rechecked" | "error".
+  const recheckIfStale = async (cfg, c) => {
+    const meta = await fetchRemoteMeta(cfg);
+    if (!meta.exists) {
+      clearConflict(); missingRef.current = true;
+      setKind("setup", "Sync is set up. Your tasks will be uploaded in the import step.");
+      return "error";
+    }
+    if (meta.sha === c.remote.sha && hashString(contentRef.current) === c.localHash) return null;
+    const remote = await loadRemote(cfg);
+    conflictRef.current = { ...c, notice: "Something changed while you were reviewing, so the list was updated. Please check it again." };
+    await handleDivergence(cfg, remote, c.legacy);
+    return "rechecked";
+  };
+
+  const withBusy = async (fn) => {
+    if (busyRef.current) return "busy";
+    busyRef.current = true;
+    try { return await fn(); }
+    catch (e) { setStatus(errorStatus(e)); setConflictOpen(false); return "error"; }
+    finally { busyRef.current = false; runQueued(); }
+  };
+
+  // User confirmed the conflict screen.
+  const resolveConflict = (choices, dayChoice, catChoice) => withBusy(async () => {
+    const cfg = cfgRef.current;
+    const c = conflictRef.current;
+    if (!c) return "error";
+    const stale = await recheckIfStale(cfg, c);
+    if (stale) return stale;
+    const merged = buildMergedNotebook(c.base, c.local, c.remote.canonical, c.merge, choices, dayChoice, catChoice);
+    try {
+      await commitMerged(cfg, merged, c.remote);
+    } catch (e) {
+      if (e instanceof SyncHttpError && (e.status === 409 || e.status === 422)) {
+        conflictRef.current = { ...c, notice: "GitHub changed while you were reviewing, so the list was updated. Please check it again." };
+        await handleDivergence(cfg, await loadRemote(cfg), c.legacy);
+        return "rechecked";
+      }
+      throw e;
+    }
+    clearConflict();
+    if (hashString(contentRef.current) !== stateRef.current.hash) { setKind("pending"); schedule(); } else setKind("synced");
+    return "saved";
+  });
+
+  // Never-synced device: download a backup of this device's notebook, then
+  // switch to GitHub's copy. Nothing is written to GitHub.
+  const takeRemoteCopy = () => withBusy(async () => {
+    const cfg = cfgRef.current;
+    const c = conflictRef.current;
+    if (!c) return "error";
+    const stale = await recheckIfStale(cfg, c);
+    if (stale) return stale;
+    backupRef.current();
+    applyLocal(c.remote.canonical, c.remote.content);
+    recordSynced(cfg, c.remote.sha, c.remote.content);
+    clearConflict();
+    setKind("synced");
+    return "saved";
+  });
+
+  // Close the screen without writing anything. Sync stays paused.
+  const cancelConflict = () => setConflictOpen(false);
 
   // Every local change: remember it and schedule a debounced save.
   useEffect(() => {
@@ -4938,7 +5232,7 @@ function useGitHubSync({ data, applyRemote, hadLocalData, configVersion }) {
     if (same) return;
     cfgRef.current = cfg;
     clearTimeout(timerRef.current);
-    pausedRef.current = false;
+    clearConflict();
     missingRef.current = false;
     readyRef.current = false;
     if (!isSyncConfigured(cfg)) { stateRef.current = null; setKind("local"); return; }
@@ -4965,7 +5259,11 @@ function useGitHubSync({ data, applyRemote, hadLocalData, configVersion }) {
     };
   }, []);
 
-  return { status, refresh: () => pull(true) };
+  return {
+    status, refresh: () => pull(true),
+    conflict, conflictOpen, openConflict: () => setConflictOpen(true),
+    resolveConflict, takeRemoteCopy, cancelConflict,
+  };
 }
 
 /* ─── App update check ───
@@ -5025,9 +5323,210 @@ const SYNC_STATUS_LABELS = {
   pending: { text: "Unsaved", color: "#B45309", dot: "#F59E0B", title: "Changes will be saved to GitHub in a moment." },
   saving: { text: "Saving…", color: "#B45309", dot: "#F59E0B", title: "Saving to GitHub." },
   paused: { text: "Sync paused", color: "#B91C1C", dot: "#EF4444", title: "Sync is paused. Your edits are safe on this device." },
+  conflict: { text: "Needs review", color: "#B91C1C", dot: "#EF4444", title: "Changes on both sides need your review." },
   offline: { text: "Not synced", color: "#B45309", dot: "#F59E0B", title: "Can't reach GitHub. Working locally." },
   error: { text: "Not synced", color: "#B91C1C", dot: "#EF4444", title: "GitHub returned an error. Working locally." },
 };
+
+/* ─── Conflict screen (v1.8.4, sync Stage 4) ─── */
+const SECTION_LABELS = { todayTasks: "Today", futureTasks: "Future", backlogTasks: "Backlog", somedayTasks: "Someday", ongoingTasks: "Ongoing", recurringTemplates: "Recurring template" };
+
+function formatStamp(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function describeEntry(entry, categories) {
+  if (!entry) return null;
+  const t = entry.item;
+  const isTemplate = entry.section === "recurringTemplates";
+  const status = t.deleted ? "Deleted"
+    : isTemplate ? (t.status === "paused" ? "Paused" : "Active")
+    : (t.completed || t.ongoingCompleted) ? "Done"
+    : t.status === "waiting" ? "Waiting"
+    : "Open";
+  const tags = Object.entries(t.tags || {}).filter(([, v]) => v)
+    .map(([cat, v]) => getTagValue(categories, cat, v)?.label || v).join(", ");
+  return {
+    Title: t.title || "(untitled)",
+    Section: SECTION_LABELS[entry.section] || entry.section,
+    "Due date": isTemplate ? (t.recurrenceRule?.frequency || "—") : formatDate(t.dueDate),
+    Status: status,
+    Notes: [t.description, t.statusNote].filter(Boolean).join(" · ") || "—",
+    Tags: tags || "—",
+    Reminders: (Array.isArray(t.reminders) && t.reminders.length) ? t.reminders.map(formatStamp).join(", ") : "—",
+  };
+}
+
+const CONFLICT_FIELDS = ["Title", "Section", "Due date", "Status", "Notes", "Tags", "Reminders"];
+
+function ChoiceButton({ selected, onClick, children, testId }) {
+  return (
+    <button data-testid={testId} data-selected={selected ? "true" : "false"} onClick={onClick}
+      style={{ ...smallBtnStyle, backgroundColor: selected ? "#1A1A1A" : "#FFFFFF", color: selected ? "#FFFFFF" : "#6B6B67", borderColor: selected ? "#1A1A1A" : "#EBEBEA" }}>
+      {selected ? "✓ " : ""}{children}
+    </button>
+  );
+}
+
+function ConflictSide({ title, desc, other, stamp }) {
+  return (
+    <div style={{ flex: 1, minWidth: 0, border: "1px solid #EBEBEA", borderRadius: "8px", padding: "8px 10px", backgroundColor: "#FFFFFF" }}>
+      <div style={{ fontSize: "11px", fontWeight: 700, color: "#8A8A86", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "6px" }}>
+        {title}{stamp ? <span style={{ fontWeight: 500, textTransform: "none", letterSpacing: 0 }}> · changed {stamp}</span> : null}
+      </div>
+      {!desc ? (
+        <div style={{ fontSize: "13px", color: "#B91C1C", fontStyle: "italic" }}>Removed</div>
+      ) : CONFLICT_FIELDS.map((f) => {
+        const differs = !other || other[f] !== desc[f];
+        return (
+          <div key={f} data-differs={differs ? "true" : "false"} style={{ display: "flex", gap: "8px", fontSize: "12px", lineHeight: 1.5, padding: "1px 4px", borderRadius: "4px", backgroundColor: differs ? "#FEF3C7" : "transparent" }}>
+            <span style={{ width: "70px", flexShrink: 0, color: "#AEAEA6" }}>{f}</span>
+            <span style={{ color: "#1A1A1A", wordBreak: "break-word" }}>{desc[f]}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ConflictScreen({ conflict, categories, onResolve, onUseRemote, onCancel }) {
+  const { merge, legacy } = conflict;
+  const [mode, setMode] = useState(legacy ? "ask" : "merge");
+  const [choices, setChoices] = useState({});
+  const [dayChoice, setDayChoice] = useState(null);
+  const [catChoice, setCatChoice] = useState(null);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState(null);
+
+  const clashes = merge.clashes;
+  const choose = (id, side) => setChoices((c) => ({ ...c, [id]: side }));
+  const chooseAll = (side) => {
+    setChoices(Object.fromEntries(clashes.map((c) => [c.id, side])));
+    if (merge.categories.clash) setCatChoice(side);
+  };
+  const pickDay = (side) => {
+    setDayChoice(side);
+    // The day decides the default for anything still undecided.
+    setChoices((c) => { const n = { ...c }; clashes.forEach((x) => { if (!n[x.id]) n[x.id] = side; }); return n; });
+    if (merge.categories.clash && !catChoice) setCatChoice(side);
+  };
+  const undecided = clashes.filter((c) => !choices[c.id]).length
+    + (merge.day.clash && !dayChoice ? 1 : 0) + (merge.categories.clash && !catChoice ? 1 : 0);
+
+  const run = async (fn) => {
+    setWorking(true); setError(null);
+    const r = await fn();
+    setWorking(false);
+    if (r === "error") setError("Couldn't reach GitHub. Nothing was changed. Try again in a moment.");
+  };
+
+  const dayLabel = (d) => (d ? new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }) : "—");
+  const autoCount = merge.fromMac + merge.fromGithub;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: "20px" }}>
+      <div data-testid="conflict-screen" style={{ backgroundColor: "#FFFFFF", borderRadius: "16px", padding: "28px", maxWidth: "760px", width: "100%", maxHeight: "86vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.15)", fontFamily: "inherit" }}>
+        <h2 style={{ fontSize: "20px", fontWeight: 700, color: "#1A1A1A", margin: "0 0 6px 0" }}>Sync: review changes</h2>
+        {conflict.notice && (
+          <div data-testid="conflict-notice" style={{ fontSize: "13px", padding: "8px 12px", borderRadius: "8px", backgroundColor: "#EEF2FF", color: "#3730A3", marginBottom: "12px" }}>{conflict.notice}</div>
+        )}
+
+        {mode === "ask" ? (
+          <>
+            <p style={{ fontSize: "14px", color: "#6B6B67", margin: "0 0 18px 0", lineHeight: 1.5 }}>
+              GitHub already has a notebook, and this device has its own tasks that were never synced. Nothing has been changed yet.
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginBottom: "18px" }}>
+              <button data-testid="use-remote" disabled={working} onClick={() => run(onUseRemote)} style={{ ...pillBtnStyle, backgroundColor: "#1A1A1A", color: "#FFF", textAlign: "left" }}>
+                Use GitHub's copy
+                <div style={{ fontSize: "12px", fontWeight: 400, opacity: 0.8 }}>A backup of this device's tasks downloads first, then this device switches to GitHub's notebook.</div>
+              </button>
+              <button data-testid="merge-both" disabled={working} onClick={() => setMode("merge")} style={{ ...bulkBtnStyle, textAlign: "left" }}>
+                Merge both
+                <div style={{ fontSize: "12px", fontWeight: 400 }}>Keep tasks from both sides; you pick where the same task differs.</div>
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p style={{ fontSize: "14px", color: "#6B6B67", margin: "0 0 16px 0", lineHeight: 1.5 }}>
+              Your notebook changed both on this device and on GitHub.
+              {autoCount > 0 && <> {autoCount} change{autoCount === 1 ? "" : "s"} merged on {autoCount === 1 ? "its" : "their"} own.</>}
+              {clashes.length > 0 ? <> {clashes.length} task{clashes.length === 1 ? " was" : "s were"} changed on both sides; pick which version to keep.</> : <> Nothing clashes.</>}
+              {" "}Nothing is saved until you press Save.
+            </p>
+
+            {merge.day.clash && (
+              <div data-testid="day-clash" style={{ border: "1px solid #FDE68A", backgroundColor: "#FFFBEB", borderRadius: "10px", padding: "12px 14px", marginBottom: "16px" }}>
+                <div style={{ fontSize: "14px", fontWeight: 600, color: "#92400E", marginBottom: "4px" }}>☀ New Day ran on both sides</div>
+                <div style={{ fontSize: "13px", color: "#92400E", marginBottom: "10px" }}>
+                  This device is on {dayLabel(merge.day.mac)}; GitHub is on {dayLabel(merge.day.github)}. Pick which day to keep. Undecided tasks below follow your pick.
+                </div>
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <ChoiceButton testId="day-mac" selected={dayChoice === "mac"} onClick={() => pickDay("mac")}>Keep this device's day ({dayLabel(merge.day.mac)})</ChoiceButton>
+                  <ChoiceButton testId="day-github" selected={dayChoice === "github"} onClick={() => pickDay("github")}>Keep GitHub's day ({dayLabel(merge.day.github)})</ChoiceButton>
+                </div>
+              </div>
+            )}
+
+            {(clashes.length > 1 || (clashes.length > 0 && merge.categories.clash)) && (
+              <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+                <button data-testid="all-mac" onClick={() => chooseAll("mac")} style={bulkBtnStyle}>All this device's</button>
+                <button data-testid="all-github" onClick={() => chooseAll("github")} style={bulkBtnStyle}>All GitHub's</button>
+              </div>
+            )}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "18px" }}>
+              {merge.categories.clash && (
+                <div data-testid="clash-categories" style={{ border: "1px solid #EBEBEA", borderRadius: "10px", padding: "12px", backgroundColor: "#FAFAF9" }}>
+                  <div style={{ fontSize: "14px", fontWeight: 600, color: "#1A1A1A", marginBottom: "8px" }}>🏷 Tag categories changed on both sides</div>
+                  <div style={{ display: "flex", gap: "8px" }}>
+                    <ChoiceButton selected={catChoice === "mac"} onClick={() => setCatChoice("mac")}>Keep this device's</ChoiceButton>
+                    <ChoiceButton selected={catChoice === "github"} onClick={() => setCatChoice("github")}>Keep GitHub's</ChoiceButton>
+                  </div>
+                </div>
+              )}
+              {clashes.map((c) => {
+                const mac = describeEntry(c.mac, categories);
+                const gh = describeEntry(c.github, categories);
+                return (
+                  <div key={c.id} data-testid="clash" data-id={c.id} style={{ border: "1px solid #EBEBEA", borderRadius: "10px", padding: "12px", backgroundColor: "#FAFAF9" }}>
+                    <div style={{ fontSize: "14px", fontWeight: 600, color: "#1A1A1A", marginBottom: "8px" }}>{(mac || gh).Title}</div>
+                    <div style={{ display: "flex", gap: "10px", marginBottom: "10px", flexWrap: "wrap" }}>
+                      <ConflictSide title="This device" desc={mac} other={gh} stamp={formatStamp(c.mac?.item.updatedAt)} />
+                      <ConflictSide title="GitHub" desc={gh} other={mac} stamp={formatStamp(c.github?.item.updatedAt)} />
+                    </div>
+                    <div style={{ display: "flex", gap: "8px" }}>
+                      <ChoiceButton testId="keep-mac" selected={choices[c.id] === "mac"} onClick={() => choose(c.id, "mac")}>Keep this device's</ChoiceButton>
+                      <ChoiceButton testId="keep-github" selected={choices[c.id] === "github"} onClick={() => choose(c.id, "github")}>Keep GitHub's</ChoiceButton>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {error && <div style={{ fontSize: "13px", color: "#B91C1C", marginBottom: "12px" }}>{error}</div>}
+        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          <button data-testid="conflict-cancel" disabled={working} onClick={onCancel} style={bulkBtnStyle}>Cancel</button>
+          <span style={{ fontSize: "12px", color: "#AEAEA6" }}>Cancel changes nothing; sync stays paused.</span>
+          <div style={{ flex: 1 }} />
+          {mode === "merge" && (
+            <button data-testid="conflict-save" disabled={working || undecided > 0}
+              onClick={() => run(() => onResolve(choices, dayChoice, catChoice))}
+              style={{ ...pillBtnStyle, backgroundColor: undecided > 0 ? "#D4D4D0" : "#1A1A1A", color: "#FFF", cursor: undecided > 0 ? "default" : "pointer" }}>
+              {working ? "Saving…" : undecided > 0 ? `${undecided} left to pick` : "Save merged notebook"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ═══════════════════════════════════════════
    MAIN APP
@@ -5155,6 +5654,7 @@ export default function TodoApp() {
   const sync = useGitHubSync({
     data: { currentDay, categories, todayTasks, backlogTasks, somedayTasks, futureTasks, ongoingTasks, recurringTemplates },
     applyRemote: applyRemoteNotebook,
+    onBackup: () => handleExport(),
     hadLocalData: !!saved,
     configVersion: syncConfigVersion,
   });
@@ -5493,6 +5993,16 @@ export default function TodoApp() {
         <div data-testid="sync-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5 }}>
           {sync.status.message}
         </div>
+      )}
+      {sync.status.kind === "conflict" && !sync.conflictOpen && (
+        <div data-testid="sync-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5, display: "flex", alignItems: "center", gap: "10px" }}>
+          <span style={{ flex: 1 }}>{sync.status.message} Sync is paused until you review.</span>
+          <button data-testid="review-changes" onClick={sync.openConflict} style={{ ...smallBtnStyle, color: "#991B1B", borderColor: "#FECACA" }}>Review changes</button>
+        </div>
+      )}
+      {sync.conflict && sync.conflictOpen && (
+        <ConflictScreen key={sync.conflict.legacy ? "legacy" : "merge"} conflict={sync.conflict} categories={categories}
+          onResolve={sync.resolveConflict} onUseRemote={sync.takeRemoteCopy} onCancel={sync.cancelConflict} />
       )}
       {sync.status.kind === "setup" && (
         <div data-testid="sync-note" style={{ maxWidth: "780px", margin: "-12px auto 16px", fontSize: "12px", color: "#AEAEA6", textAlign: "right" }}>
