@@ -16,7 +16,7 @@ The core pillars this project is being built toward:
 3. **Nothing falls through the cracks** — Backlog, Someday, Future, drift/overdue
    indicators, soft delete, and JSON export/import keep the whole picture visible.
 
-This repository is currently at **v1.9.1** (shipped). See `PROJECT_PLAN.md` for the
+This repository is currently at **v1.9.2** (shipped). See `PROJECT_PLAN.md` for the
 status block, the full changelog, and what's parked for future versions.
 
 ---
