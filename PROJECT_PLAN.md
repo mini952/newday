@@ -10,7 +10,7 @@
 
 | Field | Value |
 |---|---|
-| Current shipped version | **v1.9.1** |
+| Current shipped version | **v1.9.2** |
 | In development | — (none active) |
 | Active implementation plan | `IMPLEMENTATION_PLAN.md` — holds the most recent cycle (v1.8) |
 | `DATA_VERSION` (storage schema) | 6 |
@@ -758,8 +758,17 @@ A feature release: **sync between devices through a private GitHub repo**. It wa
 ### v1.9.1 — November 2, 2026
 
 - **Dates follow the device's local day.** "Today" used to come from the UTC date, so after 7–8 PM Eastern the app thought it was already tomorrow: the header said "1 day ago", New Day jumped a day ahead (pulling tomorrow's Future tasks and recurring instances in early), Backlog "Created" groups and the export filename were a day off, and editing a completed task could move its completed date forward. One helper (`localDateStr`) now supplies the local date. Stored timestamps (`updatedAt`, `exportedAt`, `completedDate`) are still written as ISO/UTC.
-- **Toolbar.** The tab row keeps only the five tabs; on the right are the sync status with a coloured dot (green synced, amber offline/unsaved, red key problem, orange test mode), the version label, and a **☰** menu with Export backup, Import backup, Refresh, Sync settings and a Test mode switch. The header is 900 px wide so the tabs fit on one line. "✓ Imported" appears briefly next to the status.
+- **Toolbar.** The tab row keeps only the five tabs; on the right are the sync status with a coloured dot (green synced, amber offline/unsaved, red key problem, orange test mode), the version label, and a **☰** menu with Export backup, Import backup, Refresh, Sync settings and a Test mode switch. The header is 900 px wide so the tabs fit on one line (changed in v1.9.2). "✓ Imported" appears briefly next to the status.
 - **Test mode.** Uses `notebook-test.json` in newday-data and separate local storage keys, with an orange "TEST MODE: using test tasks" bar and a one-click way back. It can never write `notebook.json` (blocked in code and tested).
+
+### v1.9.2 — November 3, 2026
+
+- **Two page layouts.** Notebook pages (Daily Notebook, Future Notebook, Recurring Notebook) are 680 px wide; database pages (Task Database, Tag Database) are 900 px. The tab row (tabs, sync status, version, ☰) is the same width as the open page and lines up with its edges. Each page has 20 px of padding inside its border, so the page and tab row measure 720 px or 940 px. In a narrow window the page shrinks to fit, and the Task Database table scrolls sideways (minimum 860 px) instead of squeezing its columns.
+- **Tab names.** Every tab name is two words on two lines with its icon beside it. "Recurring" is now **Recurring Notebook** (also the page heading, which was "Recurring Tasks"), and "Tag Manager" is now **Tag Database**. Internal tab ids and storage keys are unchanged, so no data migration is needed.
+- **Folder-tab look.** The app background is a light gray (#EFEEE9). The page and the active tab are one #FAFAF9 shape with a 1 px #DEDDD7 outline: 8 px rounded tab tops, inverse curves where the active tab meets the page's top edge, rounded page corners, and a straight left edge when the leftmost tab is open. Inactive tab text is #9C9C95. The outline is an SVG in the sticky tab row that re-measures on tab switch, resize and font load, so it stays joined while the page scrolls under it. The active tab no longer fades its background or border, which had left a faint seam.
+- **Banners** (new version, sync and key notices) now sit inside the top of the page instead of between the tab row and the page.
+- **Task Database columns.** Title 19%, Project 7%, Completed 10%, Deleted 9%, so COMPLETED and DELETED no longer run together.
+- **Tests.** New `tests/layout-tabs.test.js` checks page and tab row widths and edges per page type at 1280, 1024 and 800 px, the tab names and two-line labels, the outline (straight left edge on Daily, curves elsewhere), no overflow, the column widths, resize and scroll, the ☰ menu, and test mode with its orange bar. The v1.9.1 toolbar test was updated for the new widths and the v1.9.2 label.
 
 ---
 

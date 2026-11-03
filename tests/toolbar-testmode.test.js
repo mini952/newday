@@ -1,4 +1,4 @@
-// v1.9.1: toolbar menu, status colours, test mode isolation. Made-up data; fake GitHub.
+// v1.9.1 + v1.9.2: toolbar menu, status colours, test mode isolation. Made-up data; fake GitHub.
 const puppeteer = require("puppeteer-core");
 const fs = require("fs");
 const { FakeGitHub, attachFake } = require("./fake-github.js");
@@ -53,9 +53,9 @@ async function shot(p, name) { if (!SHOTS) return; await p.evaluate(() => window
     const p = await open(ctx);
     await seed(p, N_REAL, CFG);
     ok("real mode synced, dot green", (await waitKind(p, "synced")) && (await tone(p)) === "green");
-    ok("version label v1.9.1", (await p.$eval('[data-testid="app-version"]', (e) => e.textContent)) === "v1.9.1");
-    const tabs = await p.evaluate(() => { const bar = document.querySelector('[data-testid="sync-indicator"]').closest('div[style*="sticky"]'); const btns = [...bar.firstElementChild.children].filter((e) => e.tagName === "BUTTON" && e.dataset.testid !== "menu-button"); return { n: btns.length, heights: btns.map((b) => b.offsetHeight), barW: bar.getBoundingClientRect().width, extra: [...bar.querySelectorAll("button")].filter((b) => /Export|Import|Refresh|Sync/.test(b.textContent)).length }; });
-    ok(`tab row has the 5 tabs on one line (bar ${Math.round(tabs.barW)}px)`, tabs.n === 5 && Math.max(...tabs.heights) < 46 && Math.round(tabs.barW) === 900, JSON.stringify(tabs));
+    ok("version label v1.9.2", (await p.$eval('[data-testid="app-version"]', (e) => e.textContent)) === "v1.9.2");
+    const tabs = await p.evaluate(() => { const bar = document.querySelector('[data-testid="tab-row"]'); const btns = [...bar.querySelectorAll('button[data-testid^="tab-"]')]; return { n: btns.length, heights: btns.map((b) => b.offsetHeight), tops: [...new Set(btns.map((b) => Math.round(b.getBoundingClientRect().top)))].length, barW: bar.getBoundingClientRect().width, extra: [...bar.querySelectorAll("button")].filter((b) => /Export|Import|Refresh|Sync/.test(b.textContent)).length }; });
+    ok(`tab row has the 5 tabs in one row, two-line names (bar ${Math.round(tabs.barW)}px)`, tabs.n === 5 && tabs.tops === 1 && Math.max(...tabs.heights) < 60 && Math.round(tabs.barW) === 720, JSON.stringify(tabs));
     ok("no Export/Import/Refresh/Sync buttons on the tab row (menu closed)", tabs.extra === 0);
     await shot(p, "menu-closed");
     await openMenu(p);

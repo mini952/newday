@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NewDay Notebook v1.9.1</title>
+  <title>NewDay Notebook v1.9.2</title>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="NewDay Notebook">
@@ -26,7 +26,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background-color: #FAFAF9; }
+    body { background-color: #EFEEE9; }
   </style>
 </head>
 <body>
@@ -35,9 +35,9 @@
     const { useState, useRef, useCallback, useEffect } = React;
 
 /**
- * NewDay Notebook v1.9.1
+ * NewDay Notebook v1.9.2
  * A daily task management app with Daily/Future Notebook workflow,
- * multi-tag system, task database, and tag manager.
+ * multi-tag system, task database, and tag database.
  * Features: Ongoing tasks with sort (custom/priority/recent),
  * Backlog sort (date/priority/custom), Someday sort (date/priority/custom),
  * Future Notebook with New Task form, drag-and-drop, task waiting status,
@@ -112,7 +112,14 @@
  * menu (Export, Import, Refresh, Sync settings, Test mode); Test mode syncs
  * notebook-test.json with its own local copies and never touches the real
  * notebook.
- * Last updated: 2026-11-02
+ * v1.9.2: two page layouts. Notebook pages (Daily, Future, Recurring
+ * Notebook) are 680px; database pages (Task Database, Tag Database) are
+ * 900px, and the tab row matches the open page. Tab names sit on two lines;
+ * "Recurring" is now "Recurring Notebook" and "Tag Manager" is "Tag
+ * Database" (internal tab ids are unchanged). The active tab and the page
+ * are one folder-style shape on a light gray background (TabOutline).
+ * Task Database columns re-spaced so Completed/Deleted don't run together.
+ * Last updated: 2026-11-03
  */
 
 
@@ -129,7 +136,7 @@
 const TEST_MODE = false;
 
 // Shown in the header and compared against the deployed page to offer a reload.
-const APP_VERSION = "1.9.1";
+const APP_VERSION = "1.9.2";
 
 /* ═══════════════════════════════════════════
    DATA MODEL & HELPERS
@@ -2496,7 +2503,7 @@ function NotebookTab({ todayTasks, setTodayTasks, backlogTasks, setBacklogTasks,
   const daysAgo = isStale ? Math.round((new Date(todayActual + "T12:00:00") - currentDayDate) / (1000 * 60 * 60 * 24)) : 0;
 
   return (
-    <div style={{ maxWidth: "580px", margin: "0 auto" }}>
+    <div style={{ maxWidth: "680px", margin: "0 auto" }}>
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "32px" }}>
         <div>
@@ -2985,7 +2992,7 @@ function FutureTasksTab({ futureTasks, setFutureTasks, somedayTasks, setSomedayT
   const totalCount = activeFuture.length + activeSomeday.length;
 
   return (
-    <div style={{ maxWidth: "580px", margin: "0 auto" }}>
+    <div style={{ maxWidth: "680px", margin: "0 auto" }}>
       <div style={{ marginBottom: "32px" }}>
         <h1 style={{ fontSize: "26px", fontWeight: 700, color: "#1A1A1A", margin: 0, lineHeight: 1.2 }}>Future Notebook</h1>
         <p style={{ fontSize: "14px", color: "#8A8A86", margin: "4px 0 0 0" }}>{totalCount} task{totalCount !== 1 ? "s" : ""} planned</p>
@@ -3087,15 +3094,15 @@ function DatabaseTab({ allTasks, categories }) {
   const [customEnd, setCustomEnd] = useState("");
 
   const columns = [
-    { key: "title", label: "Title", width: "20%" },
+    { key: "title", label: "Title", width: "19%" },
     { key: "section", label: "Section", width: "8%" },
     { key: "life", label: "Life", width: "9%", isTag: true },
     { key: "eisenhower", label: "E-M Value", width: "9%", isTag: true },
-    { key: "project", label: "Project", width: "10%", isTag: true },
+    { key: "project", label: "Project", width: "7%", isTag: true },
     { key: "dueDate", label: "Due", width: "8%" },
     { key: "createdDate", label: "Created", width: "8%" },
-    { key: "completedDate", label: "Completed", width: "8%" },
-    { key: "deletedDate", label: "Deleted", width: "8%" },
+    { key: "completedDate", label: "Completed", width: "10%" },
+    { key: "deletedDate", label: "Deleted", width: "9%" },
     { key: "dayOrder", label: "Day #", width: "5%" },
     { key: "completed", label: "Done", width: "6%" },
   ];
@@ -3203,7 +3210,8 @@ function DatabaseTab({ allTasks, categories }) {
         )}
       </div>
 
-      <div style={{ borderRadius: "10px", border: "1px solid #EBEBEA", overflow: "hidden", backgroundColor: "#FFFFFF" }}>
+      <div style={{ borderRadius: "10px", border: "1px solid #EBEBEA", overflowX: "auto", overflowY: "hidden", backgroundColor: "#FFFFFF" }}>
+        <div data-testid="db-table" style={{ minWidth: "860px" }}>{/* v1.9.2: narrow windows scroll sideways instead of squeezing columns */}
         <div style={{ display: "flex", borderBottom: "2px solid #EBEBEA", backgroundColor: "#FAFAF9" }}>
           {columns.map((col) => (
             <div key={col.key} onClick={() => handleSort(col.key)}
@@ -3227,22 +3235,23 @@ function DatabaseTab({ allTasks, categories }) {
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#FCFCFB"; }}
               onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}
             >
-              <div style={{ ...cellStyle, width: "20%", fontWeight: 500, textDecoration: task.completed || task.deleted ? "line-through" : "none" }}>{task.title}</div>
+              <div style={{ ...cellStyle, width: "19%", fontWeight: 500, textDecoration: task.completed || task.deleted ? "line-through" : "none" }}>{task.title}</div>
               <div style={{ ...cellStyle, width: "8%" }}>
                 <span style={{ fontSize: "11px", fontWeight: 600, padding: "2px 6px", borderRadius: "4px", backgroundColor: sc.bg, color: sc.text }}>{task.deleted ? "Deleted" : task.section}</span>
               </div>
               <div style={{ ...cellStyle, width: "9%" }}><TagBadge categories={categories} categoryId="life" valueId={task.tags?.life} small /></div>
               <div style={{ ...cellStyle, width: "9%" }}><TagBadge categories={categories} categoryId="eisenhower" valueId={task.tags?.eisenhower} small /></div>
-              <div style={{ ...cellStyle, width: "10%" }}><TagBadge categories={categories} categoryId="project" valueId={task.tags?.project} small /></div>
+              <div style={{ ...cellStyle, width: "7%" }}><TagBadge categories={categories} categoryId="project" valueId={task.tags?.project} small /></div>
               <div style={{ ...cellStyle, width: "8%", color: "#6B6B67", fontSize: "12px" }}>{formatDateShort(task.dueDate)}</div>
               <div style={{ ...cellStyle, width: "8%", color: "#6B6B67", fontSize: "12px" }}>{formatDateShort(task.createdDate)}</div>
-              <div style={{ ...cellStyle, width: "8%", color: "#6B6B67", fontSize: "12px" }}>{formatDateShort(task.completedDate)}</div>
-              <div style={{ ...cellStyle, width: "8%", color: task.deleted ? "#DC2626" : "#6B6B67", fontSize: "12px" }}>{formatDateShort(task.deletedDate)}</div>
+              <div style={{ ...cellStyle, width: "10%", color: "#6B6B67", fontSize: "12px" }}>{formatDateShort(task.completedDate)}</div>
+              <div style={{ ...cellStyle, width: "9%", color: task.deleted ? "#DC2626" : "#6B6B67", fontSize: "12px" }}>{formatDateShort(task.deletedDate)}</div>
               <div style={{ ...cellStyle, width: "5%", color: "#AEAEA6", fontSize: "12px" }}>{task.dayOrder ?? "—"}</div>
               <div style={{ ...cellStyle, width: "6%" }}>{task.completed ? <span style={{ color: "#059669" }}>✓</span> : <span style={{ color: "#D4D4D0" }}>○</span>}</div>
             </div>
           );
         })}
+        </div>
       </div>
     </div>
   );
@@ -3353,7 +3362,7 @@ function EmojiPicker({ currentEmoji, onSelect }) {
 }
 
 /* ═══════════════════════════════════════════
-   TAB 4: TAG MANAGER
+   TAB 4: TAG DATABASE
    ═══════════════════════════════════════════ */
 
 function TagsTab({ categories, setCategories }) {
@@ -3418,7 +3427,7 @@ function TagsTab({ categories, setCategories }) {
   const colHeaders = ["Preview", "Name", "Display", "Colors / Emoji", "Actions"];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "24px", maxWidth: "800px", margin: "0 auto" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px", maxWidth: "900px", margin: "0 auto" }}>
       {categories.map((cat) => (
         <div key={cat.id} style={{ backgroundColor: "#FFFFFF", borderRadius: "12px", border: "1px solid #EBEBEA", overflow: "hidden" }}>
           {/* Category header */}
@@ -4493,9 +4502,9 @@ function RecurringTab({ recurringTemplates, setRecurringTemplates, categories, s
   const nonEmptyFreqs = Object.entries(FREQUENCY_LABELS).filter(([freq]) => grouped[freq].length > 0);
 
   return (
-    <div style={{ maxWidth: "580px", margin: "0 auto" }}>
+    <div style={{ maxWidth: "680px", margin: "0 auto" }}>
       <div style={{ marginBottom: "32px" }}>
-        <h1 style={{ fontSize: "26px", fontWeight: 700, color: "#1A1A1A", margin: 0, lineHeight: 1.2 }}>Recurring Tasks</h1>
+        <h1 style={{ fontSize: "26px", fontWeight: 700, color: "#1A1A1A", margin: 0, lineHeight: 1.2 }}>Recurring Notebook</h1>
         <p style={{ fontSize: "14px", color: "#8A8A86", margin: "4px 0 0 0" }}>
           {totalCount} template{totalCount !== 1 ? "s" : ""}
           {activeCount > 0 && <span> · {activeCount} active</span>}
@@ -5930,8 +5939,76 @@ function ConflictScreen({ conflict, categories, onResolve, onUseRemote, onCancel
    MAIN APP
    ═══════════════════════════════════════════ */
 
+/* ─── Page layout + folder-tab outline (v1.9.2) ───
+   Two page types: notebook pages (680px of content) and database pages
+   (900px). The tab row and the page share one width. The active tab and the
+   page read as one #FAFAF9 shape on the gray app background.
+
+   How the outline is drawn: the page draws its own left, right and bottom
+   border (rounded bottom corners). The sticky tab row draws an SVG behind
+   the tabs: the active tab's outline, the inverse flares where it meets the
+   page's top edge, the page's top line and its top corners. The SVG reaches
+   TAB_RADIUS + 2px below the row so the top corners stay drawn while the page
+   scrolls under the sticky row. It re-measures on tab switch, window resize,
+   font load, and any size change of the row or the active tab. */
+const APP_BG = "#EFEEE9";
+const PAGE_BG = "#FAFAF9";
+const PAGE_LINE = "#DEDDD7";
+const TAB_INACTIVE = "#9C9C95";
+const TAB_RADIUS = 8;
+const PAGE_PAD = 20;
+const PAGE_WIDTHS = { notebook: 680 + 2 * PAGE_PAD, database: 900 + 2 * PAGE_PAD };
+
+function tabOutlinePaths(g, r) {
+  const px = (v) => Math.round(v) + 0.5;
+  const P1 = 0.5, P2 = g.w - 0.5, L = g.h - 0.5, B = g.h + r + 2;
+  const X1 = px(g.x1), X2 = px(g.x2) - 1, TY = px(g.ty);
+  const flush = X1 - P1 < 1.5;
+  let d = flush
+    ? `M ${P1} ${B} L ${P1} ${TY + r} `
+    : `M ${P1} ${B} L ${P1} ${L + r} A ${r} ${r} 0 0 1 ${P1 + r} ${L} L ${X1 - r} ${L} A ${r} ${r} 0 0 0 ${X1} ${L - r} L ${X1} ${TY + r} `;
+  d += `A ${r} ${r} 0 0 1 ${X1 + r} ${TY} L ${X2 - r} ${TY} A ${r} ${r} 0 0 1 ${X2} ${TY + r} L ${X2} ${L - r} A ${r} ${r} 0 0 0 ${X2 + r} ${L} `;
+  d += `L ${P2 - r} ${L} A ${r} ${r} 0 0 1 ${P2} ${L + r} L ${P2} ${B}`;
+  return { stroke: d, fill: d + " Z", height: B, flush };
+}
+
+function TabOutline({ rowRef, activeRef, activeTab, pageWidth }) {
+  const [geo, setGeo] = useState(null);
+  const measure = useCallback(() => {
+    const row = rowRef.current, tab = activeRef.current;
+    if (!row || !tab) return;
+    const rr = row.getBoundingClientRect(), tr = tab.getBoundingClientRect();
+    const next = { w: Math.round(rr.width), h: Math.round(rr.height), x1: tr.left - rr.left, x2: tr.right - rr.left, ty: tr.top - rr.top };
+    setGeo((g) => (g && ["w", "h", "x1", "x2", "ty"].every((k) => Math.abs(g[k] - next[k]) < 0.25) ? g : next));
+  }, [rowRef, activeRef]);
+  React.useLayoutEffect(() => { measure(); }, [measure, activeTab, pageWidth]);
+  useEffect(() => {
+    window.addEventListener("resize", measure);
+    let ro = null;
+    if (typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(() => measure());
+      if (rowRef.current) ro.observe(rowRef.current);
+      if (activeRef.current) ro.observe(activeRef.current);
+    }
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(measure).catch(() => {});
+    return () => { window.removeEventListener("resize", measure); if (ro) ro.disconnect(); };
+  }, [measure, activeTab]);
+  if (!geo) return null;
+  const p = tabOutlinePaths(geo, TAB_RADIUS);
+  return (
+    <svg data-testid="tab-outline" data-flush={p.flush ? "true" : "false"} width={geo.w} height={p.height} aria-hidden="true"
+      style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none", zIndex: 0, overflow: "visible" }}>
+      <rect x="0" y={geo.h - 1} width={geo.w} height={p.height - geo.h + 1} fill={APP_BG} />
+      <path d={p.fill} fill={PAGE_BG} />
+      <path d={p.stroke} fill="none" stroke={PAGE_LINE} strokeWidth="1" />
+    </svg>
+  );
+}
+
 function TodoApp() {
   const [activeTab, setActiveTab] = useState("notebook");
+  const tabRowRef = useRef(null);
+  const activeTabRef = useRef(null);
 
   // v1.8 Phase 2: multi-add staging state lifted here (Persistence Level A) so
   // the staged rows and mode flag survive tab switches — NotebookTab unmounts
@@ -6240,15 +6317,17 @@ function TodoApp() {
   const rigCounts = { today: todayTasks.length, future: futureTasks.length, someday: somedayTasks.length, backlog: backlogTasks.length, ongoing: ongoingTasks.length, templates: recurringTemplates.length };
 
   const tabs = [
-    { id: "notebook", label: "Daily Notebook", icon: "📓" },
-    { id: "future", label: "Future Notebook", icon: "📅" },
-    { id: "recurring", label: "Recurring", icon: "🔄" },
-    { id: "database", label: "Task Database", icon: "📊" },
-    { id: "tags", label: "Tag Manager", icon: "🏷" },
+    { id: "notebook", label: "Daily Notebook", icon: "📓", layout: "notebook" },
+    { id: "future", label: "Future Notebook", icon: "📅", layout: "notebook" },
+    { id: "recurring", label: "Recurring Notebook", icon: "🔄", layout: "notebook" },
+    { id: "database", label: "Task Database", icon: "📊", layout: "database" },
+    { id: "tags", label: "Tag Database", icon: "🏷", layout: "database" },
   ];
+  const activeLayout = (tabs.find((t) => t.id === activeTab) || tabs[0]).layout;
+  const pageWidth = PAGE_WIDTHS[activeLayout];
 
   return (
-    <div style={{ fontFamily: "'DM Sans', 'Helvetica Neue', sans-serif", backgroundColor: "#FAFAF9", minHeight: "100vh", padding: "0 20px 80px" }}>
+    <div data-testid="app-root" style={{ fontFamily: "'DM Sans', 'Helvetica Neue', sans-serif", backgroundColor: APP_BG, minHeight: "100vh", padding: "0 20px 80px" }}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
       {/* ── Test Rig banner + tools (Part A) — inert in production ── */}
@@ -6324,26 +6403,32 @@ function TodoApp() {
           </button>
         </div>
       )}
-      <div style={{ maxWidth: "900px", margin: "0 auto", position: "sticky", top: TEST_DATA_MODE ? "36px" : 0, backgroundColor: "#FAFAF9", zIndex: 50, borderBottom: "1px solid #EBEBEA", padding: "20px 0 0 0", marginBottom: "24px", transition: "max-width 0.2s" }}>
-        <div style={{ display: "flex", alignItems: "center" }}>
-          {tabs.map((tab) => (
-            <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+      <div ref={tabRowRef} data-testid="tab-row" data-layout={activeLayout} style={{ maxWidth: pageWidth + "px", margin: "0 auto", position: "sticky", top: TEST_DATA_MODE ? "36px" : 0, backgroundColor: APP_BG, zIndex: 50, padding: "20px 8px 0 0" }}>
+        <TabOutline rowRef={tabRowRef} activeRef={activeTabRef} activeTab={activeTab} pageWidth={pageWidth} />
+        <div style={{ position: "relative", zIndex: 1, display: "flex", alignItems: "flex-end" }}>
+          {tabs.map((tab) => {
+            const on = activeTab === tab.id;
+            const [w1, ...rest] = tab.label.split(" ");
+            return (
+            <button key={tab.id} ref={on ? activeTabRef : null} data-testid={"tab-" + tab.id} data-active={on ? "true" : "false"} onClick={() => setActiveTab(tab.id)}
               style={{
-                fontSize: "14px", fontWeight: activeTab === tab.id ? 600 : 500, padding: "10px 14px", whiteSpace: "nowrap",
-                border: "none", backgroundColor: "transparent", color: activeTab === tab.id ? "#1A1A1A" : "#AEAEA6",
-                cursor: "pointer", fontFamily: "inherit",
-                borderBottom: activeTab === tab.id ? "2px solid #1A1A1A" : "2px solid transparent",
-                marginBottom: "-1px", transition: "all 0.15s", display: "flex", alignItems: "center", gap: "6px",
+                fontSize: "14px", fontWeight: on ? 600 : 500, padding: "9px 8px", whiteSpace: "nowrap",
+                border: "none", backgroundColor: "transparent", color: on ? "#1A1A1A" : TAB_INACTIVE,
+                cursor: "pointer", fontFamily: "inherit", textAlign: "left",
+                transition: "color 0.15s", display: "flex", alignItems: "center", gap: "6px",
               }}
-              onMouseEnter={(e) => { if (activeTab !== tab.id) e.currentTarget.style.color = "#6B6B67"; }}
-              onMouseLeave={(e) => { if (activeTab !== tab.id) e.currentTarget.style.color = "#AEAEA6"; }}
+              onMouseEnter={(e) => { if (!on) e.currentTarget.style.color = "#6B6B67"; }}
+              onMouseLeave={(e) => { if (!on) e.currentTarget.style.color = TAB_INACTIVE; }}
             >
-              <span style={{ fontSize: "15px" }}>{tab.icon}</span>
-              {tab.label}
+              <span style={{ fontSize: "14px" }}>{tab.icon}</span>
+              <span style={{ display: "flex", flexDirection: "column", lineHeight: 1.15 }}>
+                <span>{w1}</span><span>{rest.join(" ")}</span>
+              </span>
             </button>
-          ))}
+            );
+          })}
           <div style={{ flex: 1 }} />
-          <div ref={menuRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px", whiteSpace: "nowrap" }}>
+          <div ref={menuRef} style={{ position: "relative", display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px", whiteSpace: "nowrap" }}>
             {importStatus && (
               <span data-testid="import-note" style={{ fontSize: "11px", fontWeight: 600, color: importStatus === "success" ? "#059669" : "#DC2626" }}>
                 {importStatus === "success" ? "✓ Imported" : "✗ Invalid file"}
@@ -6378,30 +6463,34 @@ function TodoApp() {
         </div>
       </div>
 
+      <div data-testid="page" data-layout={activeLayout} style={{ maxWidth: pageWidth + "px", margin: "0 auto", backgroundColor: PAGE_BG,
+        borderLeft: "1px solid " + PAGE_LINE, borderRight: "1px solid " + PAGE_LINE, borderBottom: "1px solid " + PAGE_LINE,
+        borderRadius: (activeTab === tabs[0].id ? "0" : TAB_RADIUS + "px") + " " + TAB_RADIUS + "px " + TAB_RADIUS + "px " + TAB_RADIUS + "px",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.03)", padding: "28px " + PAGE_PAD + "px 48px" }}>
       {update.newVersion && (
-        <div data-testid="update-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#EEF2FF", color: "#3730A3", fontSize: "13px", display: "flex", alignItems: "center", gap: "10px" }}>
+        <div data-testid="update-banner" style={{ margin: "0 0 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#EEF2FF", color: "#3730A3", fontSize: "13px", display: "flex", alignItems: "center", gap: "10px" }}>
           <span style={{ flex: 1 }}>A new version of NewDay (v{update.newVersion}) is available.</span>
           <button onClick={() => reloadToVersion(update.newVersion)} style={{ ...smallBtnStyle, color: "#3730A3", borderColor: "#C7D2FE" }}>Reload now</button>
         </div>
       )}
       {sync.status.kind === "paused" && (
-        <div data-testid="sync-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5 }}>
+        <div data-testid="sync-banner" style={{ margin: "0 0 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5 }}>
           {sync.status.message}
         </div>
       )}
       {sync.status.kind === "auth" && (
-        <div data-testid="key-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5, display: "flex", alignItems: "center", gap: "10px" }}>
+        <div data-testid="key-banner" style={{ margin: "0 0 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5, display: "flex", alignItems: "center", gap: "10px" }}>
           <span style={{ flex: 1 }}>{sync.status.message}</span>
           <button data-testid="open-sync" onClick={() => setSyncOpen(true)} style={{ ...smallBtnStyle, color: "#991B1B", borderColor: "#FECACA" }}>Open Sync settings</button>
         </div>
       )}
       {(sync.status.kind === "offline" || sync.status.kind === "error") && (
-        <div data-testid="sync-error-note" style={{ maxWidth: "780px", margin: "-12px auto 16px", fontSize: "12px", color: sync.status.kind === "offline" ? "#B45309" : "#B91C1C", textAlign: "right" }}>
+        <div data-testid="sync-error-note" style={{ margin: "0 0 16px", fontSize: "12px", color: sync.status.kind === "offline" ? "#B45309" : "#B91C1C", textAlign: "right" }}>
           {sync.status.message}
         </div>
       )}
       {keyReminder.show && sync.status.kind !== "auth" && (
-        <div data-testid="expiry-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FFFBEB", color: "#92400E", fontSize: "13px", lineHeight: 1.5, display: "flex", alignItems: "center", gap: "10px" }}>
+        <div data-testid="expiry-banner" style={{ margin: "0 0 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FFFBEB", color: "#92400E", fontSize: "13px", lineHeight: 1.5, display: "flex", alignItems: "center", gap: "10px" }}>
           <span style={{ flex: 1 }}>
             {keyReminder.days < 0 ? `Your GitHub key expired on ${formatDate(sync.tokenExpires)}.`
               : keyReminder.days === 0 ? "Your GitHub key expires today."
@@ -6413,7 +6502,7 @@ function TodoApp() {
         </div>
       )}
       {sync.status.kind === "conflict" && !sync.conflictOpen && (
-        <div data-testid="sync-banner" style={{ maxWidth: "780px", margin: "-12px auto 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5, display: "flex", alignItems: "center", gap: "10px" }}>
+        <div data-testid="sync-banner" style={{ margin: "0 0 16px", padding: "10px 14px", borderRadius: "10px", backgroundColor: "#FEF2F2", color: "#991B1B", fontSize: "13px", lineHeight: 1.5, display: "flex", alignItems: "center", gap: "10px" }}>
           <span style={{ flex: 1 }}>{sync.status.message} Sync is paused until you review.</span>
           <button data-testid="review-changes" onClick={sync.openConflict} style={{ ...smallBtnStyle, color: "#991B1B", borderColor: "#FECACA" }}>Review changes</button>
         </div>
@@ -6423,11 +6512,11 @@ function TodoApp() {
           onResolve={sync.resolveConflict} onUseRemote={sync.takeRemoteCopy} onCancel={sync.cancelConflict} />
       )}
       {sync.status.kind === "setup" && (
-        <div data-testid="sync-note" style={{ maxWidth: "780px", margin: "-12px auto 16px", fontSize: "12px", color: "#AEAEA6", textAlign: "right" }}>
+        <div data-testid="sync-note" style={{ margin: "0 0 16px", fontSize: "12px", color: "#AEAEA6", textAlign: "right" }}>
           {sync.status.message}
         </div>
       )}
-      <div style={{ maxWidth: activeTab === "database" ? "900px" : "780px", margin: "0 auto", transition: "max-width 0.2s" }}>
+      <div data-testid="page-content">
         {activeTab === "notebook" && (
           <NotebookTab todayTasks={todayTasks} setTodayTasks={setTodayTasks} backlogTasks={backlogTasks} setBacklogTasks={setBacklogTasks}
             somedayTasks={somedayTasks} setSomedayTasks={setSomedayTasks} futureTasks={futureTasks} setFutureTasks={setFutureTasks}
@@ -6454,6 +6543,7 @@ function TodoApp() {
         )}
         {activeTab === "database" && <DatabaseTab allTasks={allTasks} categories={categories} />}
         {activeTab === "tags" && <TagsTab categories={categories} setCategories={setCategories} />}
+      </div>
       </div>
       {syncOpen && <SyncSettingsPanel onUpload={sync.uploadStarting} onClose={() => { setSyncOpen(false); setSyncConfigVersion((v) => v + 1); }} />}
     </div>
