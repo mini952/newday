@@ -10,7 +10,7 @@
 
 | Field | Value |
 |---|---|
-| Current shipped version | **v1.9.2** |
+| Current shipped version | **v1.9.3** |
 | In development | — (none active) |
 | Active implementation plan | `IMPLEMENTATION_PLAN.md` — holds the most recent cycle (v1.8) |
 | `DATA_VERSION` (storage schema) | 6 |
@@ -769,6 +769,12 @@ A feature release: **sync between devices through a private GitHub repo**. It wa
 - **Banners** (new version, sync and key notices) now sit inside the top of the page instead of between the tab row and the page.
 - **Task Database columns.** Title 19%, Project 7%, Completed 10%, Deleted 9%, so COMPLETED and DELETED no longer run together.
 - **Tests.** New `tests/layout-tabs.test.js` checks page and tab row widths and edges per page type at 1280, 1024 and 800 px, the tab names and two-line labels, the outline (straight left edge on Daily, curves elsewhere), no overflow, the column widths, resize and scroll, the ☰ menu, and test mode with its orange bar. The v1.9.1 toolbar test was updated for the new widths and the v1.9.2 label.
+
+### v1.9.3 — November 3, 2026
+
+- **Repeat-type filter in the Future Notebook.** Small pills beside the "Upcoming — Next 7 Days" header and its count: **All | Daily Weekly Monthly Quarterly Yearly**. Clicking a type hides (or shows again) the recurring instances whose template repeats that way, in both Upcoming and Future — one shared filter. Every-N-weeks templates count as Weekly. One-time tasks always show, Someday is not filtered, the section counts follow the filter, and the "X tasks planned" total stays the full number. **All** turns every type back on and looks on only when nothing is hidden. The filter is view-only and not saved, so it starts at All on every load. Pills match the Someday sort pills in size and shape, in quiet grays (on = filled, off = faded), and wrap under the header in narrow windows.
+- **Skip in the task editor.** Double-clicking a pending recurring instance in the Daily Notebook (Today) or the Backlog now shows a **Skip** button next to Delete. It does the same skip as the hover Skip button (logged on the template, instance removed) and closes the editor. It does not appear for one-time tasks or for instances already done or skipped.
+- **Tests.** New `tests/filter-skip.test.js` covers the filter (per-type hide/show in both lists, one-time and Someday untouched, counts, total, All, reset on reload, narrow window) and the editor Skip (only on pending recurring instances in Today and Backlog; skipping logs on the template and closes the editor). The version checks in the toolbar and layout tests were updated to v1.9.3.
 
 ---
 

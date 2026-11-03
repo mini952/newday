@@ -85,7 +85,7 @@ async function shot(p, name) { if (!SHOTS) return; await p.evaluate(() => window
         const hdr = await p.evaluate(() => [...[...document.querySelectorAll("div")].find((d) => d.textContent.trim() === "Title" && d.style.width).parentElement.children].filter((d) => /^(Completed|Deleted|Title|Project)$/.test(d.textContent.trim())).map((d) => ({ t: d.textContent.trim(), w: d.style.width, over: d.scrollWidth - d.clientWidth })));
         ok("Task Database widths: Title 19%, Project 7%, Completed 10%, Deleted 9%", ["Title:19%", "Project:7%", "Completed:10%", "Deleted:9%"].every((k) => hdr.some((h) => `${h.t}:${h.w}` === k)), JSON.stringify(hdr));
         ok("COMPLETED and DELETED headers fit their columns", hdr.filter((h) => /Completed|Deleted/.test(h.t)).every((h) => h.over <= 0), JSON.stringify(hdr));
-        ok("page title shows v1.9.2", (await p.title()).includes("v1.9.2"), await p.title());
+        ok("page title shows v1.9.3", (await p.title()).includes("v1.9.3"), await p.title());
         // resize while open: outline follows
         await go(p, "future"); await p.setViewport({ width: 900, height: 820 }); await sleep(400);
         let g = await geo(p);

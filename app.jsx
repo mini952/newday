@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 
 /**
- * NewDay Notebook v1.9.2
+ * NewDay Notebook v1.9.3
  * A daily task management app with Daily/Future Notebook workflow,
  * multi-tag system, task database, and tag database.
  * Features: Ongoing tasks with sort (custom/priority/recent),
@@ -85,6 +85,13 @@ import { useState, useRef, useCallback, useEffect } from "react";
  * Database" (internal tab ids are unchanged). The active tab and the page
  * are one folder-style shape on a light gray background (TabOutline).
  * Task Database columns re-spaced so Completed/Deleted don't run together.
+ * v1.9.3: Future Notebook repeat-type filter. Pills (All | Daily Weekly
+ * Monthly Quarterly Yearly) beside the Upcoming header hide recurring
+ * instances by their template's frequency in both Upcoming and Future
+ * (every-N-weeks counts as Weekly). One-time tasks and Someday are never
+ * filtered; the "X tasks planned" total is unchanged. View-only, resets on
+ * reload. The task editor now has a Skip button next to Delete for pending
+ * recurring instances in Today and Backlog (same skip as the hover button).
  * Last updated: 2026-11-03
  */
 
@@ -102,7 +109,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 const TEST_MODE = false;
 
 // Shown in the header and compared against the deployed page to offer a reload.
-const APP_VERSION = "1.9.2";
+const APP_VERSION = "1.9.3";
 
 /* ═══════════════════════════════════════════
    DATA MODEL & HELPERS
@@ -1334,6 +1341,14 @@ function TaskItem({ task, categories, currentDay, onToggle, onChangeTag, onEditT
               onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#FEF2F2"; }}
               onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}
             >Delete</button>
+            {onSkipRecurring && task.recurringParentId && task.recurringStatus === "pending" && !task.completed && (
+              <button data-testid="editor-skip" onClick={() => { onSkipRecurring(task.id); setEditing(false); }}
+                title="Skip this occurrence"
+                style={{ fontSize: "12px", fontWeight: 600, padding: "4px 10px", borderRadius: "6px", border: "1px solid #EBEBEA", backgroundColor: "transparent", color: "#8A8A86", cursor: "pointer", fontFamily: "inherit", transition: "background-color 0.1s" }}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#F5F5F3"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "transparent"; }}
+              >Skip</button>
+            )}
             {task.ongoing && onCompleteOngoing && (
               <button onClick={() => { onCompleteOngoing(); setEditing(false); }}
                 style={{ fontSize: "12px", fontWeight: 600, padding: "4px 10px", borderRadius: "6px", border: "1px solid #BBF7D0", backgroundColor: "transparent", color: "#059669", cursor: "pointer", fontFamily: "inherit", transition: "background-color 0.1s" }}
@@ -2797,7 +2812,30 @@ function NotebookTab({ todayTasks, setTodayTasks, backlogTasks, setBacklogTasks,
    TAB 2: FUTURE NOTEBOOK
    ═══════════════════════════════════════════ */
 
-function FutureTasksTab({ futureTasks, setFutureTasks, somedayTasks, setSomedayTasks, setTodayTasks, setBacklogTasks, setOngoingTasks, categories, setCategories, currentDay, navigateToRecurring }) {
+/* v1.9.3: Future Notebook repeat-type filter pills. Same size and shape as
+   the Someday sort pills, in quiet grays: on = filled, off = faded. */
+const REPEAT_TYPES = [["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"], ["quarterly", "Quarterly"], ["yearly", "Yearly"]];
+const repeatPillStyle = (on) => ({
+  fontSize: "10px", fontWeight: 600, padding: "2px 7px", borderRadius: "4px", border: "1px solid", cursor: "pointer",
+  fontFamily: "inherit", transition: "all 0.1s", whiteSpace: "nowrap",
+  borderColor: on ? "#D6D5CF" : "#EBEBEA", backgroundColor: on ? "#EBEAE5" : "transparent", color: on ? "#5F5F5A" : "#C4C4C0",
+});
+function RepeatFilterPills({ hidden, onToggle, onAll }) {
+  const allOn = hidden.size === 0;
+  return (
+    <div data-testid="repeat-filter" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "3px", marginLeft: "4px" }}>
+      <button data-testid="repeat-all" aria-pressed={allOn} onClick={onAll} title="Show every repeat type" style={repeatPillStyle(allOn)}>All</button>
+      <span aria-hidden="true" style={{ width: "1px", height: "12px", backgroundColor: "#E2E1DC", margin: "0 3px" }} />
+      {REPEAT_TYPES.map(([k, label]) => {
+        const on = !hidden.has(k);
+        return <button key={k} data-testid={"repeat-" + k} aria-pressed={on} onClick={() => onToggle(k)}
+          title={on ? `Hide ${label.toLowerCase()} recurring tasks` : `Show ${label.toLowerCase()} recurring tasks`} style={repeatPillStyle(on)}>{label}</button>;
+      })}
+    </div>
+  );
+}
+
+function FutureTasksTab({ recurringTemplates = [], futureTasks, setFutureTasks, somedayTasks, setSomedayTasks, setTodayTasks, setBacklogTasks, setOngoingTasks, categories, setCategories, currentDay, navigateToRecurring }) {
   const addTask = useCallback((task) => {
     if (task.ongoing) { setOngoingTasks((prev) => [task, ...prev]); }
     else if (!task.dueDate) { setSomedayTasks((prev) => [task, ...prev]); }
@@ -2900,8 +2938,16 @@ function FutureTasksTab({ futureTasks, setFutureTasks, somedayTasks, setSomedayT
   sevenDaysOut.setDate(sevenDaysOut.getDate() + 7);
   const sevenDaysStr = sevenDaysOut.toISOString().split("T")[0];
 
-  const upcomingTasks = activeFuture.filter((t) => t.dueDate && t.dueDate > currentDay && t.dueDate <= sevenDaysStr);
-  const furtherTasks = activeFuture.filter((t) => t.dueDate && t.dueDate > sevenDaysStr);
+  // v1.9.3: repeat-type filter for Upcoming + Future. View-only; not saved,
+  // so it resets to "All" on reload. One-time tasks always pass.
+  const [hiddenRepeatTypes, setHiddenRepeatTypes] = useState(() => new Set());
+  const repeatTypeById = {};
+  recurringTemplates.forEach((tp) => { repeatTypeById[tp.id] = tp.recurrenceRule?.frequency; });
+  const passesRepeatFilter = (t) => !t.recurringParentId || !hiddenRepeatTypes.has(repeatTypeById[t.recurringParentId]);
+  const toggleRepeatType = (k) => setHiddenRepeatTypes((prev) => { const n = new Set(prev); if (n.has(k)) n.delete(k); else n.add(k); return n; });
+
+  const upcomingTasks = activeFuture.filter((t) => t.dueDate && t.dueDate > currentDay && t.dueDate <= sevenDaysStr).filter(passesRepeatFilter);
+  const furtherTasks = activeFuture.filter((t) => t.dueDate && t.dueDate > sevenDaysStr).filter(passesRepeatFilter);
 
   // Group by date
   const groupByDueDate = (tasks) => {
@@ -2966,10 +3012,16 @@ function FutureTasksTab({ futureTasks, setFutureTasks, somedayTasks, setSomedayT
 
       <NewTaskForm categories={categories} setCategories={setCategories} onAdd={addTask} defaultDueDate="" />
 
-      <SectionHeader title="Upcoming — Next 7 Days" count={upcomingTasks.length} />
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", columnGap: "8px", rowGap: "6px", padding: "0 16px", marginBottom: "4px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <h2 style={{ fontSize: "13px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "#8A8A86", margin: 0, whiteSpace: "nowrap" }}>Upcoming — Next 7 Days</h2>
+          <span data-testid="upcoming-count" style={{ fontSize: "11px", fontWeight: 600, color: "#B0B0AC", backgroundColor: "#F5F5F3", padding: "1px 7px", borderRadius: "10px", display: "inline-block", boxSizing: "border-box", minWidth: "28px", textAlign: "center", fontVariantNumeric: "tabular-nums" }}>{upcomingTasks.length}</span>
+        </div>
+        <RepeatFilterPills hidden={hiddenRepeatTypes} onToggle={toggleRepeatType} onAll={() => setHiddenRepeatTypes(new Set())} />
+      </div>
       {renderTaskGroup(upcomingGroups, "No tasks in the next 7 days", "future")}
 
-      <SectionHeader title="Future — Beyond 7 Days" count={furtherTasks.length} />
+      <SectionHeader title="Future — Beyond 7 Days" count={<span data-testid="future-count">{furtherTasks.length}</span>} />
       {renderTaskGroup(furtherGroups, "No tasks scheduled beyond 7 days", "future")}
 
       {/* Someday */}
@@ -6499,6 +6551,7 @@ export default function TodoApp() {
             setTodayTasks={setTodayTasks} setBacklogTasks={setBacklogTasks}
             setOngoingTasks={setOngoingTasks}
             categories={categories} setCategories={setCategories} currentDay={currentDay}
+            recurringTemplates={recurringTemplates}
             navigateToRecurring={navigateToRecurring} />
         )}
         {activeTab === "recurring" && (

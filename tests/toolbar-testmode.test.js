@@ -53,7 +53,7 @@ async function shot(p, name) { if (!SHOTS) return; await p.evaluate(() => window
     const p = await open(ctx);
     await seed(p, N_REAL, CFG);
     ok("real mode synced, dot green", (await waitKind(p, "synced")) && (await tone(p)) === "green");
-    ok("version label v1.9.2", (await p.$eval('[data-testid="app-version"]', (e) => e.textContent)) === "v1.9.2");
+    ok("version label v1.9.3", (await p.$eval('[data-testid="app-version"]', (e) => e.textContent)) === "v1.9.3");
     const tabs = await p.evaluate(() => { const bar = document.querySelector('[data-testid="tab-row"]'); const btns = [...bar.querySelectorAll('button[data-testid^="tab-"]')]; return { n: btns.length, heights: btns.map((b) => b.offsetHeight), tops: [...new Set(btns.map((b) => Math.round(b.getBoundingClientRect().top)))].length, barW: bar.getBoundingClientRect().width, extra: [...bar.querySelectorAll("button")].filter((b) => /Export|Import|Refresh|Sync/.test(b.textContent)).length }; });
     ok(`tab row has the 5 tabs in one row, two-line names (bar ${Math.round(tabs.barW)}px)`, tabs.n === 5 && tabs.tops === 1 && Math.max(...tabs.heights) < 60 && Math.round(tabs.barW) === 720, JSON.stringify(tabs));
     ok("no Export/Import/Refresh/Sync buttons on the tab row (menu closed)", tabs.extra === 0);
