@@ -14,11 +14,12 @@ node tests/dates.test.js               # local-date checks at 8 PM Eastern
 NOW=2026-11-03T04:30:00Z node tests/dates.test.js   # 11:30 PM Eastern
 node tests/toolbar-testmode.test.js    # ☰ menu, status colours, Test mode
 node tests/layout-tabs.test.js         # v1.9.2 page widths, tab names, tab outline
+node tests/filter-skip.test.js         # v1.9.3 Future repeat-type filter, Skip in the editor
 ```
 
 Options (environment variables):
 - `APP_URL`: page to test (default `http://localhost:8765/index.html`)
 - `CHROME`: path to Chrome (default `/usr/bin/google-chrome`)
 - `NOW`: fake clock for `dates.test.js` (ISO time; default 8 PM Eastern, Nov 2 2026)
-- `SHOTS`: folder to save screenshots from `toolbar-testmode.test.js` and `layout-tabs.test.js`
+- `SHOTS`: folder to save screenshots from `toolbar-testmode.test.js`, `layout-tabs.test.js` and `filter-skip.test.js`
 - `SAMPLE`: a notebook JSON file to render in `layout-tabs.test.js` (defaults to made-up tasks; never point it at real data you plan to share)
